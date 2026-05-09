@@ -1,0 +1,25 @@
+# Dependencies (installed via npm)
+node_modules/
+
+# TypeScript source (we publish compiled JS)
+src/
+
+# Build config
+tsconfig.json
+
+# Python package (not for npm)
+blender_mcp/
+pyproject.toml
+*.egg-info/
+
+# Test files
+TEST.md
+
+# Cache
+.claude/
+.temp/
+logs/
+
+# Development
+.git/
+.gitignore

@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+blender_mcp/__init__.py
+blender_mcp/server.py
+blender_mcp.egg-info/PKG-INFO
+blender_mcp.egg-info/SOURCES.txt
+blender_mcp.egg-info/dependency_links.txt
+blender_mcp.egg-info/entry_points.txt
+blender_mcp.egg-info/requires.txt
+blender_mcp.egg-info/top_level.txt
+blender_mcp/config/__init__.py
+blender_mcp/utils/__init__.py

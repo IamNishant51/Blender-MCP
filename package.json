@@ -1,0 +1,35 @@
+{
+  "name": "blender-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for controlling Blender via AI assistants",
+  "author": "Blender MCP Team",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "bin": {
+    "blender-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js",
+    "test": "echo \"No tests yet\" && exit 0",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "blender",
+    "3d",
+    "ai",
+    "claude",
+    "copilot"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0"
+  },
+  "type": "module"
+}
