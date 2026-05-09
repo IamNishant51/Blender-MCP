@@ -4,7 +4,7 @@
 -->
 <h1 align="center">
   <br>
-  <img src="logo.png" alt="Blender MCP" width="120">
+  <img src="https://raw.githubusercontent.com/IamNishant51/Blender-MCP/main/logo.png" alt="Blender MCP" width="120">
   <br>
   <br>
   Blender MCP Server
