@@ -146,7 +146,7 @@ Once connected to an AI assistant, you can create 3D scenes like:
 
 ```
 +-----------+      MCP      +-------------+    subprocess   +---------+
-| Claude/   |  <----------> | blender-mcp |  <-----------  | Blender |
+| Claude/   |  <----------> | blender-mcp |  <-----------   | Blender |
 | Copilot   |               |  (Node.js)  |  --background   |  --bg   |
 +-----------+               +-------------+                 +---------+
 ```
