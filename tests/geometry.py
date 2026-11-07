@@ -160,17 +160,58 @@ class _SocketDict(dict):
         return socket
 
 
+class _FakeRampElement:
+    def __init__(self, position=0.0, color=(1.0, 1.0, 1.0, 1.0)):
+        self.position = position
+        self.color = color
+
+
+class _FakeRampElements(list):
+    def new(self, position):
+        el = _FakeRampElement(position)
+        self.append(el)
+        self.sort(key=lambda e: e.position)
+        return el
+
+
+class _FakeColorRamp:
+    def __init__(self):
+        self.elements = _FakeRampElements([_FakeRampElement(0.0), _FakeRampElement(1.0)])
+
+
 class _FakeNode:
     def __init__(self):
         self.inputs = _SocketDict()
+        self.outputs = _SocketDict()
+        self.color_ramp = _FakeColorRamp()
 
     def __getitem__(self, key):
         return self.inputs.setdefault(key, _FakeSocket())
 
 
+class _FakeLinks:
+    def new(self, *args, **kwargs):
+        return None
+
+
+class _FakeNodeDict(dict):
+    """Node dict that auto-creates nodes on access (incl. Material Output)."""
+
+    def __missing__(self, key):
+        node = _FakeNode()
+        self[key] = node
+        return node
+
+    def new(self, node_type):
+        node = _FakeNode()
+        node.type = node_type
+        return node
+
+
 class _FakeNodeTree:
     def __init__(self):
-        self.nodes = {"Principled BSDF": _FakeNode()}
+        self.nodes = _FakeNodeDict({"Principled BSDF": _FakeNode()})
+        self.links = _FakeLinks()
 
 
 class _FakeMaterial:
@@ -178,6 +219,32 @@ class _FakeMaterial:
         self.name = name
         self.use_nodes = False
         self.node_tree = _FakeNodeTree()
+        self._props = {}
+
+    def __setitem__(self, key, value):
+        self._props[key] = value
+
+    def __getitem__(self, key):
+        return self._props[key]
+
+
+class _FakeImage:
+    def __init__(self, path):
+        self.filepath = path
+        self.colorspace_settings = _FakeColorSpace()
+
+    def pack(self):
+        pass
+
+
+class _FakeColorSpace:
+    def __init__(self):
+        self.name = "sRGB"
+
+
+class _FakeImages:
+    def load(self, path):
+        return _FakeImage(path)
 
 
 class _FakeMeshData:
@@ -201,6 +268,10 @@ class FakeObject:
         self.scale = Vector((1.0, 1.0, 1.0))
         self.rotation_euler = (0.0, 0.0, 0.0)
         self.data = _FakeMeshData() if kind == "MESH" else _FakeLightData()
+        self._selected = False
+
+    def select_set(self, state):
+        self._selected = bool(state)
 
     @property
     def matrix_world(self):
@@ -264,6 +335,17 @@ class _FakeMeshOps:
         outer = major_radius + minor_radius
         return self._add("Torus", (2 * outer, 2 * outer, 2 * minor_radius), location)
 
+    def select_all(self, action="SELECT"):
+        pass
+
+
+class _FakeUvOps:
+    def __init__(self, ctx):
+        self._ctx = ctx
+
+    def smart_project(self, angle_limit=1.1519, island_margin=0.02, **_kw):
+        self._ctx.smart_uv_calls.append((angle_limit, island_margin))
+
 
 class _FakeObjectOps:
     def __init__(self, ctx):
@@ -285,6 +367,9 @@ class _FakeObjectOps:
         self._ctx._active = obj
         self._ctx._selected = [obj]
         return obj
+
+    def mode_set(self, mode="OBJECT", **_kw):
+        self._ctx.mode = mode
 
 
 class _FakeWmOps:
@@ -322,7 +407,15 @@ class _FakeImportOps:
         return lambda filepath="", **kw: self._import(f"Imported_{self._module}_{op}", filepath, **kw)
 
 
+class _FakeViewLayerObjects:
+    def __init__(self):
+        self.active = None
+
+
 class _FakeViewLayer:
+    def __init__(self):
+        self.objects = _FakeViewLayerObjects()
+
     def update(self):
         pass
 
@@ -333,6 +426,8 @@ class _FakeContext:
         self._active = None
         self._selected = []
         self.view_layer = _FakeViewLayer()
+        self.mode = "OBJECT"
+        self.smart_uv_calls = []
         # Bounds of the single mesh a fake import creates: (dims, location)
         self.imported_bounds = ((4.0, 2.0, 0.5), (0.0, 0.0, 3.0))
         self.saved_path = None
@@ -354,6 +449,7 @@ class _FakeData:
     def __init__(self, ctx):
         self._ctx = ctx
         self.materials = self._Materials()
+        self.images = _FakeImages()
 
     @property
     def objects(self):
@@ -369,6 +465,7 @@ class _FakeOps:
         self.mesh = _FakeMeshOps(ctx)
         self.object = _FakeObjectOps(ctx)
         self.wm = _FakeWmOps(ctx)
+        self.uv = _FakeUvOps(ctx)
         self.import_scene = _FakeImportOps(ctx, "scene")
         self.import_mesh = _FakeImportOps(ctx, "mesh")
 
@@ -391,8 +488,11 @@ class _FakeMathutils:
 def execute_script(script: str, imported_bounds=((4.0, 2.0, 0.5), (0.0, 0.0, 3.0))):
     """Execute a generated Blender script against the fake bpy.
 
-    Returns the list of mesh objects left in the scene.
+    Returns the list of mesh objects left in the scene. The fake context
+    of the last run is kept on ``LAST_CONTEXT`` (smart_uv_calls, mode,
+    saved_path) for tests that need it.
     """
+    global LAST_CONTEXT
     fake_bpy = _FakeBpy()
     fake_bpy.context.imported_bounds = imported_bounds
     old_bpy = sys.modules.get("bpy")
@@ -413,7 +513,12 @@ def execute_script(script: str, imported_bounds=((4.0, 2.0, 0.5), (0.0, 0.0, 3.0
             sys.modules.pop("mathutils", None)
         else:
             sys.modules["mathutils"] = old_mathutils
+    LAST_CONTEXT = fake_bpy.context
     return [o for o in fake_bpy.context._objects if o.type == "MESH"]
+
+
+#: Fake context of the most recent execute_script run (or None).
+LAST_CONTEXT = None
 
 
 def scene_bounds(objects):

@@ -33,6 +33,7 @@ BOUNDS_SNIPPET = """
 import bpy, json
 from mathutils import Vector
 
+bpy.context.view_layer.update()  # flush scale/location edits into matrix_world
 objs = []
 for o in bpy.data.objects:
     if o.type == 'MESH':
@@ -126,16 +127,27 @@ def assert_template(name, result):
         check("temple: height 6-8 m", 6.0 < size[2] < 8.0, f"height = {size[2]:.2f}")
         check("temple: taller than wide", size[2] > size[0])
     elif name == "rickshaw":
-        wheels = [o for o in result["objects"] if o["name"].startswith("Wheel")]
+        # Real Blender renames duplicate names: the 3 wheels are
+        # "Wheel", "Wheel.001", "Wheel.002" (hubs are "WheelHub*").
+        wheels = [o for o in result["objects"]
+                  if o["name"] == "Wheel" or o["name"].startswith("Wheel.")]
         check("rickshaw: 3 wheels", len(wheels) == 3, f"got {len(wheels)}")
-        check("rickshaw: under 2 m tall", size[2] < 2.0, f"height = {size[2]:.2f}")
+        check("rickshaw: length 2.66 m ±10%", abs(size[0] - 2.66) / 2.66 < 0.1, f"length = {size[0]:.2f}")
+        check("rickshaw: height 1.70 m ±10%", abs(size[2] - 1.70) / 1.70 < 0.1, f"height = {size[2]:.2f}")
+        for w in wheels:
+            check("rickshaw: tyre Ø 0.42 m", abs((w["max"][2] - w["min"][2]) - 0.42) < 0.02)
     elif name == "thali":
-        check("thali: 5 objects", len(result["objects"]) == 5)
+        check("thali: 11 objects", len(result["objects"]) == 11, f"got {len(result['objects'])}")
         check("thali: under 0.25 m tall", size[2] < 0.25, f"height = {size[2]:.3f}")
+        plate = next(o for o in result["objects"] if o["name"] == "ThaliPlate")
+        check("thali: plate Ø 0.32 m ±10%", abs((plate["max"][0] - plate["min"][0]) - 0.32) / 0.32 < 0.1)
     elif name == "building":
-        check("building: height 7.5-8 m", 7.5 < size[2] < 8.0, f"height = {size[2]:.2f}")
+        check("building: height 7.9-9.4 m", 7.9 < size[2] < 9.4, f"height = {size[2]:.2f}")
+        check("building: no temple spire", not any(o["name"].startswith("Shikhara") for o in result["objects"]))
     elif name == "character":
-        check("character: 1.87 m tall", abs(size[2] - 1.87) < 0.05, f"height = {size[2]:.2f}")
+        check("character: 1.75 m tall ±10%", abs(size[2] - 1.75) / 1.75 < 0.1, f"height = {size[2]:.2f}")
+        head = next(o for o in result["objects"] if o["name"] == "Head")
+        check("character: head top above z = 1.5", head["max"][2] > 1.5, f"head top = {head['max'][2]:.2f}")
 
 
 def verify_import():
@@ -172,6 +184,83 @@ bpy.ops.export_scene.gltf(filepath={str(glb_path)!r}, export_format='GLB')
         check("import: normalised min z = 0", abs(result["scene_min"][2]) < 0.01, f"min z = {result['scene_min'][2]:.3f}")
 
 
+def verify_spec_and_render():
+    """v1.2.0: build_from_spec + render_model end to end, both servers.
+
+    build_from_spec must return real bounds (min z = 0); render_model must
+    return PNGs that exist on disk and are non-empty; a render against a
+    missing .blend must return success:false.
+    """
+    print("spec + render (real Blender)")
+    import asyncio
+
+    spec = {
+        "objects": [
+            {"name": "Table", "kind": "cube", "size_m": [1.2, 0.8, 0.05],
+             "position_m": [0, 0, 0.7], "material": "wood"},
+            {"name": "Leg", "kind": "cylinder", "size_m": [0.08, 0.08, 0.7],
+             "position_m": [0, 0, 0], "attach": "grounded"},
+            {"name": "Top", "kind": "cube", "size_m": [1.2, 0.8, 0.05],
+             "position_m": [0, 0, 0.75], "attach": "on_top_of:Table"},
+        ]
+    }
+
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        # --- Python server ---
+        from blender_mcp.config import BlenderConfig, PathsConfig, ServerConfig
+        from blender_mcp.server import ModelBuilder
+        from blender_mcp.spec import build_from_spec
+
+        cfg = ServerConfig(
+            paths=PathsConfig(
+                base_dir=tmp, temp_dir=tmp / ".temp", output_dir=tmp / "output",
+                texture_dir=tmp / "textures", log_dir=tmp / "logs",
+            ),
+            blender=BlenderConfig(executable=BLENDER, timeout=300),
+        )
+        mb = ModelBuilder(cfg)
+        script, errs = build_from_spec(spec)
+        check("py spec: valid spec builds", script is not None and not errs, "; ".join(errs))
+        built = mb.create_mesh_with_report(script)
+        check("py spec: build succeeds", built["success"], built.get("error", ""))
+        check("py spec: min z = 0", abs(built.get("min_z", 99)) < 0.001, f"min z = {built.get('min_z')}")
+        rendered = mb.render_model(built["output"], str(tmp / "py_render"), ["front", "side", "perspective"])
+        check("py render: success", rendered["success"], rendered.get("error", ""))
+        for r in rendered.get("renders", []):
+            p = Path(r["path"])
+            check(f"py render: {r['view']} PNG exists and non-empty", p.exists() and p.stat().st_size > 0)
+        missing = mb.render_model(str(tmp / "nope.blend"), str(tmp / "x"), ["front"])
+        check("py render: missing .blend fails", missing["success"] is False)
+
+        # --- TypeScript server (node) ---
+        ts_driver = f"""
+import {{ ModelBuilder }} from '{REPO}/dist/commands/model.js';
+import {{ generateModelScript }} from '{REPO}/dist/commands/generators.js';
+const base = process.argv[2];
+const mb = new ModelBuilder(
+  {{ executable: process.env.BLENDER_EXECUTABLE || 'blender', timeout: 300, backgroundMode: true }},
+  {{ baseDir: base, tempDir: base + '/.temp', outputDir: base + '/output', textureDir: base + '/textures', logDir: base + '/logs' }});
+const built = await mb.createMeshWithReport(generateModelScript('auto rickshaw', ''));
+if (!built.success) {{ console.log(JSON.stringify({{ ok: false, stage: 'build', error: built.error }})); process.exit(0); }}
+const rendered = await mb.renderModel(built.output, base + '/ts_render', ['front', 'side', 'perspective']);
+console.log(JSON.stringify({{ ok: rendered.success, error: rendered.error, renders: rendered.renders || [] }}));
+"""
+        gen = tmp / "ts_render_driver.mjs"
+        gen.write_text(ts_driver)
+        proc = subprocess.run(
+            ["node", str(gen), str(tmp)], cwd=REPO, capture_output=True, text=True, timeout=1200,
+        )
+        try:
+            ts_result = json.loads(proc.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            ts_result = {"ok": False, "error": f"no JSON from node driver. stdout={proc.stdout[-1000:]} stderr={proc.stderr[-1000:]}"}
+        check("ts render: success", ts_result.get("ok") is True, str(ts_result.get("error", "")))
+        for r in ts_result.get("renders", []):
+            p = Path(r["path"])
+            check(f"ts render: {r['view']} PNG exists and non-empty", p.exists() and p.stat().st_size > 0)
+
+
 def main():
     if not BLENDER:
         print("No Blender found: set BLENDER_EXECUTABLE or put blender on PATH.")
@@ -188,6 +277,9 @@ def main():
 
     print()
     verify_import()
+
+    print()
+    verify_spec_and_render()
 
     print(f"\n{'All real-Blender checks passed.' if not FAILURES else str(len(FAILURES)) + ' check(s) FAILED: ' + ', '.join(FAILURES)}")
     return 0 if not FAILURES else 1

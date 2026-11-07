@@ -1,4 +1,4 @@
-"""Bounding-box tests for the built-in templates (P1-7).
+"""Bounding-box tests for the built-in templates (P1-7) + v1.2.0 spec/render tests.
 
 Every template script is executed against tests/geometry.py's fake bpy and
 its world-space bounding boxes are asserted: nothing below the ground, sane
@@ -9,7 +9,11 @@ Run with:  python -m pytest
 (needs the mcp package: pip install -e ".[test]")
 """
 
+import asyncio
 import logging
+import math
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -17,11 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pytest
 
+import geometry
 from geometry import execute_script, scene_bounds
 
 from blender_mcp.config import BlenderConfig, PathsConfig, ServerConfig
 from blender_mcp.server import BlenderMCPServer
 from blender_mcp.utils import setup_logging
+from blender_mcp.spec import validate_spec, build_from_spec
+from blender_mcp.materials import MaterialLibrary, get_smart_uv_script, pick_polyhaven_maps
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +58,9 @@ def server(tmp_path_factory):
     class _StubSearch:
         def search_models(self, query):
             return {"all_results": []}
+
+        def search_textures(self, query):
+            return []
 
     instance = BlenderMCPServer.__new__(BlenderMCPServer)
     instance.config = cfg
@@ -104,7 +114,9 @@ def test_temple_stands_upright(server):
     assert abs(m_lo.z - 0.0) < 0.001
 
 
-def test_rickshaw_wheels_touch_the_ground(server):
+def test_rickshaw_is_a_real_bajaj_re(server):
+    """Bajaj RE spec: 2.66 long x 1.30 wide x 1.70 high, wheelbase 2.00,
+    ground clearance 0.20, 3 wheels (1 front, 2 rear), tyre Ø 0.42."""
     objects = execute_script(server._generate_rickshaw_script(""))
     assert_on_ground(objects)
     wheels = [o for o in objects if o.name == "Wheel"]
@@ -112,39 +124,80 @@ def test_rickshaw_wheels_touch_the_ground(server):
     for w in wheels:
         lo, hi = w.world_bounds()
         assert abs(lo.z) < 0.001, f"wheel floats or sinks: min z = {lo.z:.3f}"
-        assert abs((hi.z - lo.z) - 1.0) < 0.01, "wheel diameter should be 1.0 m"
+        assert abs((hi.z - lo.z) - 0.42) < 0.01, f"tyre diameter should be 0.42 m, got {hi.z - lo.z:.3f}"
     lo, hi = scene_bounds(objects)
-    assert hi.z - lo.z < 2.0, "rickshaw should be under 2 m tall, not 4.4 m"
-    body = by_name(objects)["BodyMain"]
-    b_lo, b_hi = body.world_bounds()
-    assert abs((b_hi.y - b_lo.y) - 2.2) < 0.01, "rickshaw body should be 2.2 m long"
+    length = hi.x - lo.x
+    height = hi.z - lo.z
+    assert abs(length - 2.66) / 2.66 < 0.10, f"rickshaw length should be 2.66 m ±10%, got {length:.2f}"
+    assert abs(height - 1.70) / 1.70 < 0.10, f"rickshaw height should be 1.70 m ±10%, got {height:.2f}"
+    # Wheelbase: front wheel well forward of the rear axle.
+    front = [w for w in wheels if w.location.x > 0][0]
+    rear = [w for w in wheels if w.location.x < 0]
+    assert abs((front.location.x - rear[0].location.x) - 2.00) < 0.01, "wheelbase should be 2.00 m"
+    # Low canopy peaking at 1.70 — it must not swallow the body.
+    canopy = by_name(objects)["Canopy"]
+    c_lo, c_hi = canopy.world_bounds()
+    assert abs(c_hi.z - 1.70) < 0.01, f"canopy must peak at 1.70 m, got {c_hi.z:.2f}"
+    assert c_hi.z - c_lo.z < 0.2, "canopy must be a thin curved sheet, not a dome"
+    # Floor at ground-clearance height.
+    floor = by_name(objects)["FloorPan"]
+    f_lo, _ = floor.world_bounds()
+    assert abs(f_lo.z - 0.20) < 0.01, f"floor bottom should be at z = 0.20, got {f_lo.z:.2f}"
 
 
-def test_thali_is_a_small_flat_plate(server):
+def test_thali_is_a_small_steel_plate(server):
     objects = execute_script(server._generate_thali_script(""))
-    assert len(objects) == 5  # plate + rice mound + 3 bowls
+    assert len(objects) == 11  # plate + rice + 4 katoris + 4 contents + roti
     assert_on_ground(objects)
     lo, hi = scene_bounds(objects)
     assert hi.z - lo.z < 0.25, "thali should be flat, under 0.25 m tall"
     plate = by_name(objects)["ThaliPlate"]
     p_lo, p_hi = plate.world_bounds()
-    assert abs((p_hi.x - p_lo.x) - 0.7) < 0.01, "plate should be 0.7 m across"
-    assert abs(p_hi.z - 0.03) < 0.01, "plate top should be at z = 0.03"
+    assert abs((p_hi.x - p_lo.x) - 0.32) / 0.32 < 0.10, f"plate should be Ø 0.32 m ±10%, got {p_hi.x - p_lo.x:.3f}"
+    assert abs(p_hi.z - 0.022) < 0.002, f"plate top should be at z = 0.022, got {p_hi.z:.3f}"
+    # Four katoris with distinct contents, in a ring around the rice.
+    for food in ["Dal", "Sabzi", "Curd", "Kheer"]:
+        assert f"Katori_{food}" in by_name(objects), f"missing katori {food}"
+        assert food in by_name(objects), f"missing contents {food}"
+    rice = by_name(objects)["RiceMound"]
+    r_lo, r_hi = rice.world_bounds()
+    assert abs((r_hi.x - r_lo.x) - 0.13) < 0.01, "rice mound should be Ø 0.13 m"
+    assert abs(r_hi.z - 0.072) < 0.005, "rice dome top should be at z ≈ 0.072"
 
 
-def test_haveli_floors_stack_upwards(server):
+def test_haveli_has_a_real_courtyard(server):
     objects = execute_script(server._generate_building_script(""))
     assert_on_ground(objects)
     names = by_name(objects)
-    ground_lo, ground_hi = names["GroundFloor"].world_bounds()
-    first_lo, first_hi = names["FirstFloor"].world_bounds()
-    roof_lo, roof_hi = names["MainRoof"].world_bounds()
-    assert abs(ground_hi.z - 3.0) < 0.01, "ground floor should top out at z = 3"
-    assert abs(first_lo.z - 3.0) < 0.01, "first floor should start at z = 3"
-    assert abs(first_hi.z - 5.5) < 0.01, "first floor should top out at z = 5.5"
-    assert abs(roof_lo.z - 5.5) < 0.01, "roof should start at z = 5.5"
+    assert not any(n.startswith("Shikhara") for n in names), "haveli must not have a temple spire"
+    # Plinth footprint 12 x 10.
+    plinth = names["Plinth"]
+    pl_lo, pl_hi = plinth.world_bounds()
+    assert abs((pl_hi.x - pl_lo.x) - 12.0) < 0.01, "plinth should be 12 m long"
+    assert abs((pl_hi.y - pl_lo.y) - 10.0) < 0.01, "plinth should be 10 m deep"
+    # Two floors, 3.2 m each: ground 0.5-3.7, first 3.7-6.9.
+    gf = names["GroundFloor_Front"]
+    ff = names["FirstFloor_Front"]
+    _, gf_hi = gf.world_bounds()
+    ff_lo, ff_hi = ff.world_bounds()
+    assert abs(gf_hi.z - 3.7) < 0.01, "ground floor should top out at z = 3.7"
+    assert abs(ff_lo.z - 3.7) < 0.01, "first floor should start at z = 3.7"
+    assert abs(ff_hi.z - 6.9) < 0.01, "first floor should top out at z = 6.9"
+    # Parapet top at 7.9; total height 7.9-9.4 (chhatri finials ~9.03).
     lo, hi = scene_bounds(objects)
-    assert 7.5 < hi.z < 8.0, f"haveli height {hi.z:.2f} m is wrong"
+    assert 7.9 < hi.z < 9.4, f"haveli height {hi.z:.2f} m is wrong"
+    # Courtyard void: nothing but the paving slab may occupy the centre
+    # column (x=0, y=0) above the plinth.
+    blocking = [
+        o for o in objects
+        if o.name != "CourtyardPaving"
+        and (lambda b: b[0].x < 0 < b[1].x and b[0].y < 0 < b[1].y and b[1].z > 0.6)(o.world_bounds())
+    ]
+    assert blocking == [], f"courtyard is blocked by: {[o.name for o in blocking]}"
+    # Jharokhas project from the front face (y = -5) by ~1 m.
+    jharokha = names["JharokhaSlab_3.0"]
+    j_lo, j_hi = jharokha.world_bounds()
+    assert j_lo.y < -5.9, f"jharokha should project to about y = -6, got min y = {j_lo.y:.2f}"
 
 
 def test_character_stands_upright(server):
@@ -156,12 +209,29 @@ def test_character_stands_upright(server):
     dhoti = names["Dhoti"]
     # Head above torso above dhoti, feet on the ground.
     assert head.location.z > torso.location.z > dhoti.location.z
-    d_lo, _ = dhoti.world_bounds()
-    assert abs(d_lo.z) < 0.001, "dhoti must start at the ground"
     h_lo, h_hi = head.world_bounds()
-    assert abs(h_hi.z - 1.87) < 0.01, f"figure should be 1.87 m tall, got {h_hi.z:.2f}"
+    assert h_hi.z > 1.5, f"head top must be clearly visible above z = 1.5, got {h_hi.z:.2f}"
     lo, hi = scene_bounds(objects)
-    assert hi.x - lo.x < 1.2, "figure footprint should be about 1 m wide"
+    assert abs((hi.z - lo.z) - 1.75) / 1.75 < 0.10, f"figure should be 1.75 m ±10%, got {hi.z - lo.z:.2f}"
+    # No big white box: torso narrower than the shoulders.
+    shoulders = names["Shoulders"]
+    t_lo, t_hi = torso.world_bounds()
+    s_lo, s_hi = shoulders.world_bounds()
+    assert (t_hi.x - t_lo.x) < (s_hi.x - s_lo.x), "torso must be narrower than the shoulders"
+    # Fingertips reach mid-thigh (z = 0.65).
+    hands = [o for o in objects if o.name == "Hand"]
+    assert len(hands) == 2
+    for hand in hands:
+        hand_lo, _ = hand.world_bounds()
+        assert abs(hand_lo.z - 0.65) < 0.01, f"fingertips should reach z = 0.65, got {hand_lo.z:.2f}"
+    # Feet/sandals on the ground, dhoti hem just above the ankle.
+    feet = [o for o in objects if o.name == "Foot"]
+    assert len(feet) == 2
+    for foot in feet:
+        f_lo, _ = foot.world_bounds()
+        assert abs(f_lo.z) < 0.001, "feet must stand on the ground"
+    d_lo, _ = dhoti.world_bounds()
+    assert abs(d_lo.z - 0.02) < 0.001, f"dhoti hem should be at z = 0.02, got {d_lo.z:.2f}"
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +251,9 @@ def test_execute_blender_code_tool_exists(server):
     names = [t.name for t in server._list_tools()]
     assert "execute_blender_code" in names
     assert "create_complex_model" in names
+    assert "research_model" in names
+    assert "build_from_spec" in names
+    assert "render_model" in names
 
 
 def test_execute_blender_code_rejects_empty(server):
@@ -248,3 +321,258 @@ def test_all_templates_compile(server):
         compile(script, f"<{name}>", "exec")
     import_script = BlenderMCPServer._build_import_script("/tmp/m.glb", "bpy.ops.import_scene.gltf", "/tmp/o.blend", 1.0)
     compile(import_script, "<import>", "exec")
+
+
+# ---------------------------------------------------------------------------
+# Scene spec validation (v1.2.0)
+# ---------------------------------------------------------------------------
+
+VALID_TABLE_SPEC = {
+    "objects": [
+        {"name": "Table", "kind": "cube", "size_m": [1.2, 0.8, 0.05],
+         "position_m": [0, 0, 0.7], "material": "wood"},
+        {"name": "Leg", "kind": "cylinder", "size_m": [0.08, 0.08, 0.7],
+         "position_m": [0, 0, 0], "attach": "grounded"},
+        {"name": "Top", "kind": "cube", "size_m": [1.2, 0.8, 0.05],
+         "position_m": [0, 0, 0.75], "attach": "on_top_of:Table"},
+    ]
+}
+
+
+def test_spec_accepts_valid_with_mates():
+    assert validate_spec(VALID_TABLE_SPEC) == []
+
+
+def test_spec_rejects_negative_z():
+    spec = {"objects": [{"name": "X", "kind": "cube", "size_m": [1, 1, 1],
+                         "position_m": [0, 0, -0.5]}]}
+    errors = validate_spec(spec)
+    assert errors, "negative z must fail validation"
+    assert any("position_m.z" in e and "X" in e for e in errors), errors
+
+
+def test_spec_rejects_zero_size():
+    spec = {"objects": [{"name": "X", "kind": "cube", "size_m": [0, 1, 1],
+                         "position_m": [0, 0, 0]}]}
+    errors = validate_spec(spec)
+    assert any("size_m.x" in e for e in errors), errors
+    spec["objects"][0]["size_m"] = [1, 1, 0]
+    errors = validate_spec(spec)
+    assert any("size_m.z" in e for e in errors), errors
+
+
+def test_spec_rejects_out_of_bounds():
+    spec = {"objects": [{"name": "X", "kind": "cube", "size_m": [1, 1, 1],
+                         "position_m": [6, 0, 0]}]}
+    errors = validate_spec(spec)
+    assert any("outside work area" in e for e in errors), errors
+    spec["objects"][0]["position_m"] = [0, 0, 9.5]
+    errors = validate_spec(spec)
+    assert any("outside work area" in e for e in errors), errors
+
+
+def test_spec_rejects_non_touching_attach():
+    spec = {"objects": [
+        {"name": "A", "kind": "cube", "size_m": [1, 1, 1], "position_m": [0, 0, 0]},
+        {"name": "B", "kind": "cube", "size_m": [1, 1, 1], "position_m": [0, 0, 5],
+         "attach": "on_top_of:A"},
+    ]}
+    errors = validate_spec(spec)
+    assert any("does not touch" in e and "B" in e for e in errors), errors
+
+
+def test_spec_rejects_unknown_attach_parent():
+    spec = {"objects": [
+        {"name": "B", "kind": "cube", "size_m": [1, 1, 1], "position_m": [0, 0, 1],
+         "attach": "on_top_of:Missing"},
+    ]}
+    errors = validate_spec(spec)
+    assert any("unknown object" in e for e in errors), errors
+
+
+def test_spec_rejects_bad_kind():
+    spec = {"objects": [{"name": "X", "kind": "torus_knot", "size_m": [1, 1, 1],
+                         "position_m": [0, 0, 0]}]}
+    errors = validate_spec(spec)
+    assert any("kind" in e for e in errors), errors
+
+
+def test_build_from_spec_solves_mates_from_bboxes():
+    script, errors = build_from_spec(VALID_TABLE_SPEC)
+    assert errors == [], errors
+    assert script is not None
+    compile(script, "<spec>", "exec")
+    objects = execute_script(script)
+    names = by_name(objects)
+    # on_top_of: the Top sits exactly on the Table (0.75), never guessed.
+    top_lo, top_hi = names["Top"].world_bounds()
+    assert abs(top_lo.z - 0.75) < 0.001, f"Top should sit on the Table at z = 0.75, got {top_lo.z:.3f}"
+    leg_lo, _ = names["Leg"].world_bounds()
+    assert abs(leg_lo.z) < 0.001, "grounded Leg must stand on the ground"
+    lo, hi = scene_bounds(objects)
+    assert abs(lo.z) < 0.001
+    assert abs(hi.z - 0.8) < 0.001
+
+
+def test_build_from_spec_returns_errors_not_script():
+    spec = {"objects": [{"name": "X", "kind": "cube", "size_m": [1, 1, 1],
+                         "position_m": [0, 0, -1]}]}
+    script, errors = build_from_spec(spec)
+    assert script is None
+    assert errors, "invalid spec must report the failed checks"
+
+
+def test_build_from_spec_tool_rejects_invalid(server):
+    result = asyncio.run(server._build_from_spec({"spec": {"objects": [
+        {"name": "X", "kind": "cube", "size_m": [1, 1, 1], "position_m": [0, 0, -1]},
+    ]}}))
+    assert result["success"] is False
+    assert result["errors"], "tool must return the exact failed checks"
+
+
+def test_research_model_returns_schema(server):
+    result = asyncio.run(server._research_model({"query": "wooden chair"}))
+    assert result["success"] is True
+    assert isinstance(result["references"], list)
+    assert "part_breakdown_schema" in result
+    assert "build_from_spec" in result["next_step"]
+
+
+# ---------------------------------------------------------------------------
+# Materials v2 + Smart UV + Poly Haven
+# ---------------------------------------------------------------------------
+
+def test_material_scripts_are_node_trees():
+    for name in ["wood", "marble", "metal", "fabric", "steel", "glass", "skin", "sandstone"]:
+        script = MaterialLibrary.get_material_script(name)
+        assert "ShaderNode" in script, f"{name} should build a node tree"
+        assert "Principled BSDF" in script
+    assert "ShaderNodeTexNoise" in MaterialLibrary.get_material_script("wood")
+    assert "ShaderNodeTexVoronoi" in MaterialLibrary.get_material_script("marble")
+    assert "Subsurface Weight" in MaterialLibrary.get_material_script("skin")
+    assert "Sheen Weight" in MaterialLibrary.get_material_script("fabric")
+    assert "Transmission Weight" in MaterialLibrary.get_material_script("glass")
+    assert "Metallic" in MaterialLibrary.get_material_script("metal")
+    # Unknown names fall back to a flat colour (no node tree).
+    fallback = MaterialLibrary.get_material_script("not_a_material")
+    assert "ShaderNodeTexNoise" not in fallback
+    assert "Base Color" in fallback
+
+
+def test_smart_uv_script_runs_before_texturing():
+    setup = '''
+import bpy, math
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+bpy.ops.mesh.primitive_cube_add(location=(0, 0, 0.5))
+mat = bpy.data.materials.new(name="M")
+mat.use_nodes = True
+targets = [o for o in bpy.data.objects if o.type == "MESH"]
+'''
+    execute_script(setup + get_smart_uv_script())
+    assert geometry.LAST_CONTEXT is not None
+    # 66 degrees in radians, island margin 0.02 — and back to OBJECT mode.
+    assert geometry.LAST_CONTEXT.smart_uv_calls == [(math.radians(66), 0.02)]
+    assert geometry.LAST_CONTEXT.mode == "OBJECT"
+
+
+def test_polyhaven_map_picking():
+    files = {
+        "Diffuse": {"1k": {"jpg": {"url": "https://x/diff_1k.jpg"}}},
+        "Rough": {"1k": {"jpg": {"url": "https://x/rough_1k.jpg"}}},
+        "nor_gl": {"1k": {"jpg": {"url": "https://x/nor_1k.jpg"}}},
+        "AO": {"1k": {"jpg": {"url": "https://x/ao_1k.jpg"}}},
+    }
+    maps = pick_polyhaven_maps(files)
+    assert maps["color"] == "https://x/diff_1k.jpg"
+    assert maps["roughness"] == "https://x/rough_1k.jpg"
+    assert maps["normal"] == "https://x/nor_1k.jpg"
+    assert maps["ao"] == "https://x/ao_1k.jpg"
+    # ARM fallback when no Rough map exists.
+    files2 = {
+        "Diffuse": {"1k": {"jpg": {"url": "https://x/diff_1k.jpg"}}},
+        "arm": {"1k": {"jpg": {"url": "https://x/arm_1k.jpg"}}},
+    }
+    assert pick_polyhaven_maps(files2)["roughness_from_arm"] == "https://x/arm_1k.jpg"
+    with pytest.raises(ValueError):
+        pick_polyhaven_maps({})
+
+
+def test_polyhaven_missing_slug_fails_cleanly(server):
+    # A slug that does not exist (404) — or no network at all — must fail
+    # with a clear Poly Haven error, never a silent fallback.
+    result = asyncio.run(server._apply_texture(
+        {"texture_type": "polyhaven:does_not_exist_xyz", "object_name": ""}))
+    assert result["success"] is False
+    assert "Poly Haven" in result["error"]
+
+
+def test_apply_texture_blend_path(server, tmp_path):
+    # apply_texture takes an optional blend_path: without it the material
+    # is created in an empty scene and applied to nothing, so the script
+    # must open the model first when one is given, and a missing file
+    # must fail cleanly instead of rendering an empty scene.
+    result = asyncio.run(server._apply_texture(
+        {"texture_type": "wood", "blend_path": str(tmp_path / "nope.blend")}))
+    assert result["success"] is False
+    assert "not found" in result["error"]
+
+    captured = {}
+
+    def fake_create_mesh(script):
+        captured["script"] = script
+        return {"success": True, "output": str(tmp_path / "textured.blend")}
+
+    server.model_builder.create_mesh = fake_create_mesh
+    blend = tmp_path / "model.blend"
+    blend.write_bytes(b"fake")
+    result = asyncio.run(server._apply_texture(
+        {"texture_type": "wood", "blend_path": str(blend)}))
+    assert result["success"] is True
+    assert f'open_mainfile(filepath="{blend}")' in captured["script"]
+
+
+# ---------------------------------------------------------------------------
+# Render verification (real Blender)
+# ---------------------------------------------------------------------------
+
+def _blender_exe():
+    return os.environ.get("BLENDER_EXECUTABLE") or shutil.which("blender")
+
+
+def test_render_model_missing_blend_fails(server, tmp_path):
+    result = server.model_builder.render_model(
+        str(tmp_path / "nope.blend"), str(tmp_path / "x"), ["front"])
+    assert result["success"] is False
+    assert "not found" in result["error"]
+
+
+def test_build_from_spec_and_render_with_real_blender(server, tmp_path):
+    blender = _blender_exe()
+    if not blender:
+        pytest.skip("Blender not found: set BLENDER_EXECUTABLE")
+    server.model_builder.config.blender.executable = blender
+    server.model_builder.config.blender.timeout = 300
+
+    # build_from_spec end to end: valid spec -> .blend + bounds + min z.
+    built = asyncio.run(server._build_from_spec({"spec": VALID_TABLE_SPEC}))
+    assert built["success"], built.get("error")
+    assert built["min_z"] is not None and abs(built["min_z"]) < 0.001
+    assert {o["name"] for o in built["objects"]} == {"Table", "Leg", "Top"}
+    blend = built["output"]
+    assert Path(blend).exists()
+
+    # render_model: PNGs must exist on disk and be non-empty.
+    out = tmp_path / "table_render"
+    rendered = server.model_builder.render_model(blend, str(out), ["front", "side", "perspective"])
+    assert rendered["success"], rendered.get("error")
+    assert len(rendered["renders"]) == 3
+    for r in rendered["renders"]:
+        p = Path(r["path"])
+        assert p.exists(), f"render PNG missing: {p}"
+        assert p.stat().st_size > 0, f"render PNG empty: {p}"
+        assert r["size_bytes"] > 0
+
+    # Unknown view is a clean failure, not a crash.
+    bad = server.model_builder.render_model(blend, str(tmp_path / "bad"), ["diagonal"])
+    assert bad["success"] is False

@@ -7,10 +7,11 @@
 import { createLogger } from './utils/logger.js';
 import { config } from './config/index.js';
 import { SearchService } from './commands/search.js';
-import { ModelBuilder, getMaterialScript } from './commands/model.js';
+import { ModelBuilder, getMaterialScript, getSmartUVScript, buildPolyhavenMaterialScript, pickPolyhavenMaps, POLYHAVEN_API, POLYHAVEN_USER_AGENT, POLYHAVEN_LICENCE, } from './commands/model.js';
 import { generateModelScript } from './commands/generators.js';
+import { buildFromSpec } from './commands/spec.js';
 import { buildImportScript, IMPORT_OPERATORS, SUPPORTED_IMPORT_FORMATS } from './commands/import.js';
-import { writeFileSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 class BlenderMCPServer {
     config;
@@ -28,6 +29,41 @@ class BlenderMCPServer {
     getToolsList() {
         return {
             tools: [
+                {
+                    name: 'research_model',
+                    description: 'RESEARCH FIRST: Research a model before any code is written. Runs the model/texture search and returns top references (name, source, url) plus the part-breakdown schema. Use the references to work out the real parts and dimensions, then produce a JSON scene spec and call build_from_spec. No code is written before this step.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            query: { type: 'string', description: 'What to model, e.g. "Bajaj auto rickshaw" or "Indian thali"' },
+                        },
+                        required: ['query'],
+                    },
+                },
+                {
+                    name: 'build_from_spec',
+                    description: 'BUILD FROM SPEC: Build a scene from a JSON scene spec {objects: [{name, kind, size_m, position_m, rotation_deg, material, attach}]}. Conventions: position_m is the BOTTOM-CENTRE of the object, sizes in metres, Z-up, ground z = 0; kind is cube/sphere/cylinder/cone/torus; attach is a mate (grounded, on_top_of:<name>, centred_on:<name>) solved from the parent bounding box. The spec is validated first (sizes > 0, z >= 0, inside a 10 m work area, mates must touch within 0.05 m); on failure the exact failed checks are returned and nothing is built. On success returns object names, bounding boxes and min z.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            spec: { description: 'Scene spec object, or a JSON string of one' },
+                        },
+                        required: ['spec'],
+                    },
+                },
+                {
+                    name: 'render_model',
+                    description: 'RENDER / LOOK: Render a saved .blend with the presentation preset (50 mm camera auto-framed on the bounding-box centre, 3-point area-light rig, sun + world light, ground plane) as EEVEE PNGs, one per view. Every PNG is verified to exist on disk and be non-empty before success is reported — a missing/empty PNG returns success:false, never success:true. Returns the PNG paths and file sizes.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            blend_path: { type: 'string', description: 'Path to the .blend file to render' },
+                            output_path: { type: 'string', description: 'Output file prefix; each view renders to <prefix>_<view>.png' },
+                            views: { type: 'array', items: { type: 'string' }, description: 'Views to render (default ["front","side","perspective"]); allowed: front, side, back, top, perspective' },
+                        },
+                        required: ['blend_path', 'output_path'],
+                    },
+                },
                 {
                     name: 'create_complex_model',
                     description: 'CREATE: Build complex 3D models with internet search + detailed planning. Built-in templates only: temple/mandir, auto-rickshaw/vehicle, thali/food, haveli/palace/building, person/human/character. For anything else use execute_blender_code.',
@@ -69,8 +105,9 @@ class BlenderMCPServer {
                     inputSchema: {
                         type: 'object',
                         properties: {
-                            texture_type: { type: 'string', description: 'Texture type' },
+                            texture_type: { type: 'string', description: 'Texture type, or polyhaven:<slug> for a real Poly Haven texture' },
                             object_name: { type: 'string', description: 'Object to apply to' },
+                            blend_path: { type: 'string', description: 'Optional .blend file to open first; without it the material is created but applied to nothing' },
                         },
                         required: ['texture_type'],
                     },
@@ -119,6 +156,12 @@ class BlenderMCPServer {
     }
     async handleToolCall(name, args) {
         switch (name) {
+            case 'research_model':
+                return this.researchModel(args);
+            case 'build_from_spec':
+                return this.buildFromSpecTool(args);
+            case 'render_model':
+                return this.renderModel(args);
             case 'search_models':
                 return this.searchService.searchModels(args.query);
             case 'search_textures':
@@ -176,6 +219,87 @@ class BlenderMCPServer {
         }
         return this.modelBuilder.createMesh(code);
     }
+    async researchModel(args) {
+        const query = args.query || '';
+        if (!query.trim()) {
+            return { success: false, error: 'No query supplied.' };
+        }
+        this.logger.info(`Researching model: ${query}`);
+        const [modelResults, textureResults] = await Promise.all([
+            this.searchService.searchModels(query),
+            this.searchService.searchTextures(query),
+        ]);
+        const references = modelResults.all_results.slice(0, 8).map((r) => ({
+            name: r.name,
+            source: r.source,
+            url: r.url,
+        }));
+        const textureReferences = textureResults.slice(0, 5).map((r) => ({
+            name: r.name,
+            source: r.source,
+            url: r.url,
+        }));
+        return {
+            success: true,
+            query,
+            references,
+            texture_references: textureReferences,
+            part_breakdown_schema: {
+                description: 'Break the subject into named parts with REAL dimensions (metres) before building. One entry per part.',
+                objects: [
+                    {
+                        name: 'PartName',
+                        kind: 'cube | sphere | cylinder | cone | torus',
+                        size_m: [0.5, 0.5, 0.5],
+                        position_m: [0, 0, 0],
+                        rotation_deg: [0, 0, 0],
+                        material: 'wood | marble | metal | fabric | steel | glass | skin | sandstone | ...',
+                        attach: 'grounded | on_top_of:<ParentName> | centred_on:<ParentName>',
+                    },
+                ],
+            },
+            spec_rules: [
+                'position_m is the BOTTOM-CENTRE of the object; sizes in metres; Z is up; ground is z = 0.',
+                'Every size must be > 0; every position.z must be >= 0.',
+                'Bounding boxes must stay inside a 10 m work area (|x|, |y| <= 5, z <= 10).',
+                'attach mates are solved from the parent bounding box, never guessed: on_top_of:<name> means the part sits on the parent and must touch it within 0.05 m.',
+                'Use the references above for real proportions; do not invent dimensions.',
+            ],
+            next_step: 'Produce a JSON scene spec in the schema above (from the references and real dimensions) and call build_from_spec with it. No code is written before this step.',
+        };
+    }
+    async buildFromSpecTool(args) {
+        const spec = args.spec;
+        if (spec === undefined || spec === null || spec === '') {
+            return { success: false, error: 'No spec supplied. Call research_model first, then pass a scene spec object (or JSON string).' };
+        }
+        const { script, errors } = buildFromSpec(spec);
+        if (!script) {
+            return { success: false, errors, error: `Spec validation failed: ${errors.join('; ')}` };
+        }
+        const result = await this.modelBuilder.createMeshWithReport(script);
+        return {
+            success: result.success,
+            output: result.output || '',
+            objects: result.objects || [],
+            scene_min: result.scene_min || [],
+            scene_max: result.scene_max || [],
+            min_z: result.min_z,
+            stdout: result.stdout || '',
+            error: result.error || '',
+        };
+    }
+    async renderModel(args) {
+        const blendPath = args.blend_path || '';
+        const outputPath = args.output_path || '';
+        const views = Array.isArray(args.views) && args.views.length > 0
+            ? args.views
+            : ['front', 'side', 'perspective'];
+        if (!blendPath || !outputPath) {
+            return { success: false, error: 'blend_path and output_path are required.' };
+        }
+        return this.modelBuilder.renderModel(blendPath, outputPath, views);
+    }
     async modifyModel(args) {
         const existing = args.existing_model;
         const mods = (args.modifications || '').toLowerCase();
@@ -223,18 +347,105 @@ bpy.ops.wm.save_mainfile(filepath=output)
     async applyTexture(args) {
         const texture = args.texture_type;
         const objectName = args.object_name;
-        const matScript = getMaterialScript(texture);
+        const blendPath = args.blend_path || '';
+        if (blendPath && !existsSync(blendPath)) {
+            return { success: false, error: `Blend file not found: ${blendPath}` };
+        }
+        // Without a .blend to open, Blender starts empty and the material
+        // would be created but applied to nothing — so load the model
+        // first when one is given.
+        const openLine = blendPath ? `bpy.ops.wm.open_mainfile(filepath=${JSON.stringify(blendPath)})\n` : '';
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         const outputPath = `${this.config.paths.outputDir}/textured_${timestamp}.blend`;
+        // Poly Haven image texture: polyhaven:<slug>
+        if (texture.startsWith('polyhaven:')) {
+            const slug = texture.slice('polyhaven:'.length).trim();
+            if (!slug) {
+                return { success: false, error: 'Poly Haven texture needs a slug: polyhaven:<slug>.' };
+            }
+            let files;
+            try {
+                const response = await fetch(`${POLYHAVEN_API}/files/${encodeURIComponent(slug)}`, {
+                    headers: { 'User-Agent': POLYHAVEN_USER_AGENT },
+                    signal: AbortSignal.timeout(30_000),
+                });
+                if (!response.ok) {
+                    return { success: false, error: `Poly Haven: no texture named '${slug}' (HTTP ${response.status}). Check the slug on polyhaven.com/textures.` };
+                }
+                files = (await response.json());
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                return { success: false, error: `Poly Haven API unreachable: ${message}. No fallback material was applied — check the network and try again.` };
+            }
+            let maps;
+            try {
+                maps = pickPolyhavenMaps(files);
+            }
+            catch (error) {
+                return { success: false, error: error instanceof Error ? error.message : String(error) };
+            }
+            // Download the 1k maps (50 MB total cap).
+            const texDir = join(this.config.paths.textureDir, slug);
+            if (!existsSync(texDir))
+                mkdirSync(texDir, { recursive: true });
+            const localMaps = {};
+            let downloaded = 0;
+            const maxBytes = 50 * 1024 * 1024;
+            try {
+                for (const [role, url] of Object.entries(maps)) {
+                    const response = await fetch(url, {
+                        headers: { 'User-Agent': POLYHAVEN_USER_AGENT },
+                        signal: AbortSignal.timeout(120_000),
+                    });
+                    if (!response.ok) {
+                        return { success: false, error: `Poly Haven download failed for the ${role} map: HTTP ${response.status}.` };
+                    }
+                    const data = Buffer.from(await response.arrayBuffer());
+                    downloaded += data.length;
+                    if (downloaded > maxBytes) {
+                        return { success: false, error: 'Poly Haven download exceeds the 50 MB limit.' };
+                    }
+                    const ext = url.split('.').pop()?.split('?')[0] ?? 'jpg';
+                    const localPath = join(texDir, `${slug}_${role}.${ext}`);
+                    writeFileSync(localPath, data);
+                    localMaps[role] = localPath;
+                }
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                return { success: false, error: `Poly Haven download failed: ${message}. No fallback material was applied.` };
+            }
+            const matScript = buildPolyhavenMaterialScript(slug, localMaps, `PolyHaven_${slug}`);
+            const script = `
+import bpy, math
+${openLine}${matScript}
+target = ${JSON.stringify(objectName || '')}
+targets = [obj for obj in bpy.data.objects if obj.type == "MESH" and (not target or target in obj.name)]
+${getSmartUVScript()}
+for obj in targets:
+    obj.data.materials.append(mat)
+output = ${JSON.stringify(outputPath)}
+bpy.ops.wm.save_mainfile(filepath=output)
+`;
+            const result = await this.modelBuilder.createMesh(script);
+            return {
+                ...result,
+                texture,
+                polyhaven: { slug, url: `https://polyhaven.com/textures/${slug}`, licence: POLYHAVEN_LICENCE },
+            };
+        }
+        // Procedural material (node tree, Generated coordinates — no UVs needed).
+        const matScript = getMaterialScript(texture);
         const script = `
 import bpy
-${matScript}
-target = "${objectName || ''}"
+${openLine}${matScript}
+target = ${JSON.stringify(objectName || '')}
 for obj in bpy.data.objects:
     if obj.type == "MESH":
         if not target or target in obj.name:
             obj.data.materials.append(mat)
-output = "${outputPath}"
+output = ${JSON.stringify(outputPath)}
 bpy.ops.wm.save_mainfile(filepath=output)
 `;
         const result = await this.modelBuilder.createMesh(script);
