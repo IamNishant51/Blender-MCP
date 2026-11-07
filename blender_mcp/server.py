@@ -293,10 +293,10 @@ class ModelBuilder:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
-                return {"success": True, "output": str(output_path)}
+                return {"success": True, "output": str(output_path), "stdout": result.stdout[-2000:]}
             else:
                 self.logger.error(f"Blender script failed: {result.stderr}")
-                return {"success": False, "error": result.stderr}
+                return {"success": False, "error": result.stderr, "stdout": result.stdout[-2000:]}
 
         except subprocess.TimeoutExpired:
             self.logger.error("Blender execution timed out")
@@ -347,7 +347,7 @@ class BlenderMCPServer:
         return [
             Tool(
                 name="create_complex_model",
-                description="CREATE: Build complex 3D models with internet search + detailed planning. Supports temples, vehicles, food, buildings, characters.",
+                description="CREATE: Build complex 3D models with internet search + detailed planning. Built-in templates only: temples, vehicles, food, buildings, characters. For anything else use execute_blender_code.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -355,6 +355,26 @@ class BlenderMCPServer:
                         "customization": {"type": "string", "description": "Customize: colors (red, blue, gold), materials, scale"},
                     },
                     "required": ["description"],
+                },
+            ),
+            Tool(
+                name="execute_blender_code",
+                description=(
+                    "CODE: Run arbitrary Blender Python (bpy) code in a headless Blender "
+                    "and save the resulting scene. Use this for ANY model that is not one "
+                    "of the five built-in templates (temple/mandir, auto-rickshaw/vehicle, "
+                    "thali/food, haveli/palace/building, person/human/character). Write "
+                    "Z-up code: Z is height, ground is z = 0, all dimensions in metres, "
+                    "every part's lowest point at z >= 0. The script runs in a fresh empty "
+                    "scene; the result includes Blender's stdout/stderr and the output "
+                    ".blend path. Fix errors from the returned stderr and call again."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string", "description": "Blender Python code using bpy (imports bpy itself if needed)"},
+                    },
+                    "required": ["code"],
                 },
             ),
             Tool(
@@ -447,6 +467,9 @@ class BlenderMCPServer:
         elif name == "create_complex_model":
             return await self._create_model(arguments)
 
+        elif name == "execute_blender_code":
+            return await self._execute_blender_code(arguments)
+
         elif name == "modify_model":
             return await self._modify_model(arguments)
 
@@ -473,6 +496,20 @@ class BlenderMCPServer:
         # Phase 2: Build model
         self.logger.info(f"Phase 2: Building model")
         script = self._generate_model_script(desc, custom)
+        if script is None:
+            return {
+                "success": False,
+                "description": args.get("description"),
+                "customization": custom,
+                "error": (
+                    "No built-in template matches this description. The built-in "
+                    "templates are: temple/mandir, auto-rickshaw/vehicle, thali/food, "
+                    "haveli/palace/building, person/human/character. For anything else, "
+                    "use the execute_blender_code tool with your own bpy code (Z-up, "
+                    "dimensions in metres, ground at z = 0), or use search_models and "
+                    "import_from_url to bring in an existing model."
+                ),
+            }
         result = self.model_builder.create_mesh(script)
 
         return {
@@ -486,9 +523,12 @@ class BlenderMCPServer:
             "output": result.get("output", ""),
         }
 
-    def _generate_model_script(self, desc: str, custom: str) -> str:
-        """Generate model creation script based on description."""
-        # Simplified - would include full model generation code
+    def _generate_model_script(self, desc: str, custom: str) -> str | None:
+        """Generate model creation script based on description.
+
+        Returns None when no built-in template matches: callers must not
+        fall back to a temple. Guide the LLM to execute_blender_code instead.
+        """
         if any(w in desc for w in ["temple", "mandir"]):
             return self._generate_temple_script(custom)
         elif any(w in desc for w in ["auto", "rickshaw", "vehicle"]):
@@ -500,10 +540,10 @@ class BlenderMCPServer:
         elif any(w in desc for w in ["person", "human", "character"]):
             return self._generate_character_script(custom)
         else:
-            return self._generate_temple_script(custom)
+            return None
 
     def _generate_temple_script(self, custom: str) -> str:
-        """Generate Indian temple script."""
+        """Generate Indian temple script. Z-up, metres, ground at z = 0."""
         color = "(0.95, 0.93, 0.9, 1)"
         if "red" in custom.lower():
             color = "(0.75, 0.25, 0.2, 1)"
@@ -517,39 +557,44 @@ from math import pi
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete()
 
-# Adhishthana (Base)
+# Adhishthana (Base) - 4 steps ascending in Z, top step at z = 0.6
 for i in range(4):
-    bpy.ops.mesh.primitive_cube_add(location=(0, i*0.15, 0))
+    bpy.ops.mesh.primitive_cube_add(location=(0, 0, 0.075 + i * 0.15))
     base = bpy.context.active_object
     base.name = f"Adhisthana_{{i}}"
-    base.scale = (4.5 - i*0.3, 0.15, 3.5 - i*0.2)
+    base.scale = ((4.5 - i * 0.3) / 2, (3.5 - i * 0.2) / 2, 0.075)
 
-# Garbhagriha (Main Sanctum)
-bpy.ops.mesh.primitive_cube_add(location=(0, 2.2, 0))
+# Garbhagriha (Main Sanctum) - 3.0 wide x 2.5 deep x 2.2 tall, standing on the steps
+bpy.ops.mesh.primitive_cube_add(location=(0, 0, 1.7))
 garbha = bpy.context.active_object
 garbha.name = "Garbhagriha"
-garbha.scale = (3, 2.5, 2.2)
+garbha.scale = (1.5, 1.25, 1.1)
 
-# Shikhara (Tower)
+# Shikhara (Tower) - 5 tiers stacked in +Z above the sanctum (top z = 2.8), up to z = 6.8
 for tier in range(5):
     radius = 1.8 - tier * 0.25
-    height = 3.5 + tier * 0.8
-    bpy.ops.mesh.primitive_cone_add(location=(0, height, 0), vertices=16+tier*2)
+    bpy.ops.mesh.primitive_cone_add(location=(0, 0, 3.2 + tier * 0.8), vertices=16+tier*2)
     shikhara = bpy.context.active_object
     shikhara.name = f"ShikharaTier_{{tier}}"
-    shikhara.scale = (radius, 0.8 + tier * 0.3, radius)
+    shikhara.scale = (radius, radius, 0.4)
 
-# Stupi and Kalasha
-bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 8, 0), radius=0.15)
-bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 8.3, 0), radius=0.2)
+# Stupi and Kalasha - finials on top of the tower
+bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 0, 6.95), radius=0.15)
+bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 0, 7.2), radius=0.2)
 
-# Mandapa (Pillared Hall)
-bpy.ops.mesh.primitive_cube_add(location=(0, 1.5, -3))
+# Mandapa (Pillared Hall) - platform in front of the sanctum (towards -Y)
+bpy.ops.mesh.primitive_cube_add(location=(0, -3.5, 0.15))
 bpy.context.active_object.name = "Mandapa"
+bpy.context.active_object.scale = (1.5, 1.0, 0.15)
 
-# Pillars
-for x, z in [(-1.2, -2.5), (1.2, -2.5), (-1.2, -3.5), (1.2, -3.5)]:
-    bpy.ops.mesh.primitive_cylinder_add(location=(x, 2, z), depth=2.5, radius=0.15)
+# Pillars - standing on the mandapa platform (z = 0.3) up to the roof (z = 2.8)
+for x, y in [(-1.2, -3.0), (1.2, -3.0), (-1.2, -4.0), (1.2, -4.0)]:
+    bpy.ops.mesh.primitive_cylinder_add(location=(x, y, 1.55), depth=2.5, radius=0.15)
+
+# Mandapa roof
+bpy.ops.mesh.primitive_cube_add(location=(0, -3.5, 2.95))
+bpy.context.active_object.name = "MandapaRoof"
+bpy.context.active_object.scale = (1.5, 1.0, 0.15)
 
 # Material
 mat = bpy.data.materials.new(name="TempleMaterial")
@@ -563,16 +608,16 @@ for obj in bpy.data.objects:
         obj.data.materials.append(mat)
 
 # Lighting
-bpy.ops.object.light_add(type="SUN", location=(5, 8, 5))
+bpy.ops.object.light_add(type="SUN", location=(5, -8, 8))
 bpy.context.active_object.data.energy = 3
-bpy.ops.object.light_add(type="POINT", location=(-3, 5, 3))
+bpy.ops.object.light_add(type="POINT", location=(-3, 3, 5))
 bpy.context.active_object.data.energy = 200
 
 print("Created Indian temple")
 '''
 
     def _generate_rickshaw_script(self, custom: str) -> str:
-        """Generate auto-rickshaw script."""
+        """Generate auto-rickshaw script. Z-up, metres, ground at z = 0."""
         color = "(0.95, 0.7, 0.1, 1)"  # Yellow default
         if "red" in custom.lower():
             color = "(0.8, 0.15, 0.1, 1)"
@@ -586,24 +631,26 @@ from math import pi
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete()
 
-# Body
-bpy.ops.mesh.primitive_cube_add(location=(0, 0.6, 0))
+# Body - 1.3 wide (X) x 2.2 long (Y) x 0.7 tall, bottom at z = 0.15
+bpy.ops.mesh.primitive_cube_add(location=(0, 0, 0.5))
 body = bpy.context.active_object
 body.name = "BodyMain"
-body.scale = (1.3, 0.7, 2.2)
+body.scale = (0.65, 1.1, 0.35)
 
-# Cabin
-bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 1.2, -0.3), radius=0.7)
+# Cabin - canopy above the body
+bpy.ops.mesh.primitive_uv_sphere_add(location=(0, -0.2, 1.05), radius=0.7)
 cabin = bpy.context.active_object
 cabin.name = "Cabin"
-cabin.scale = (1.15, 0.85, 1.6)
+cabin.scale = (1.15, 1.6, 0.75)
 
-# Wheels
-for x, z in [(-0.75, -0.4), (0.75, -0.4), (-0.6, 1), (0.6, 1)]:
-    bpy.ops.mesh.primitive_torus_add(location=(x, 0.3, z), major_radius=0.38, minor_radius=0.12)
+# Wheels - 3 wheels, outer radius 0.5, centres at z = 0.5 so they touch the ground.
+# Torus ring lies in the XY plane by default; rotating 90 deg about Y puts the
+# ring in the ZY plane so the axle runs along X and the wheel rolls along Y.
+for x, y in [(-0.75, 0.9), (0.75, 0.9), (0, -1.0)]:
+    bpy.ops.mesh.primitive_torus_add(location=(x, y, 0.5), major_radius=0.38, minor_radius=0.12)
     wheel = bpy.context.active_object
     wheel.name = "Wheel"
-    wheel.rotation_euler = (pi/2, 0, 0)
+    wheel.rotation_euler = (0, pi / 2, 0)
 
 # Material
 mat = bpy.data.materials.new(name="AutoBody")
@@ -616,35 +663,35 @@ for obj in bpy.data.objects:
     if obj.type == "MESH" and "Body" in obj.name:
         obj.data.materials.append(mat)
 
-bpy.ops.object.light_add(type="SUN", location=(3, 5, 3))
+bpy.ops.object.light_add(type="SUN", location=(3, -5, 4))
 bpy.context.active_object.data.energy = 2
 
 print("Created auto-rickshaw")
 '''
 
     def _generate_thali_script(self, custom: str) -> str:
-        """Generate thali script."""
+        """Generate thali script. Z-up, metres, ground at z = 0."""
         return '''
 import bpy
 
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete()
 
-# Plate
-bpy.ops.mesh.primitive_cylinder_add(location=(0, 0.15, 0), radius=1.3, depth=0.12)
+# Plate - 0.7 m across, 0.03 m thick, sitting on the ground
+bpy.ops.mesh.primitive_cylinder_add(location=(0, 0, 0.015), radius=0.35, depth=0.03)
 plate = bpy.context.active_object
 plate.name = "ThaliPlate"
 
-# Rice mound
-bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 0.35, 0), radius=0.45)
+# Rice mound - flattened in Z, sitting on the plate (top z = 0.03)
+bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 0, 0.09), radius=0.12)
 rice = bpy.context.active_object
 rice.name = "RiceMound"
-rice.scale = (1, 0.5, 1)
+rice.scale = (1, 1, 0.5)
 
-# Bowls
-for x, z in [(0.5, 0.3), (-0.5, 0.3), (0, 0.5)]:
-    bpy.ops.mesh.primitive_uv_sphere_add(location=(x, 0.3, z), radius=0.25)
-    bpy.context.active_object.scale = (1, 0.6, 1)
+# Bowls - flattened in Z, sitting on the plate
+for x, y in [(0.18, 0.1), (-0.18, 0.1), (0, -0.18)]:
+    bpy.ops.mesh.primitive_uv_sphere_add(location=(x, y, 0.08), radius=0.08)
+    bpy.context.active_object.scale = (1, 1, 0.6)
 
 # Material
 mat = bpy.data.materials.new(name="Steel")
@@ -661,34 +708,34 @@ print("Created Indian thali")
 '''
 
     def _generate_building_script(self, custom: str) -> str:
-        """Generate haveli/building script."""
+        """Generate haveli/building script. Z-up, metres, ground at z = 0."""
         return '''
 import bpy
 
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete()
 
-# Ground floor
-bpy.ops.mesh.primitive_cube_add(location=(0, 1.5, 0))
+# Ground floor - 8 wide (X) x 6 deep (Y) x 3 tall, standing on the ground
+bpy.ops.mesh.primitive_cube_add(location=(0, 0, 1.5))
 bpy.context.active_object.name = "GroundFloor"
-bpy.context.active_object.scale = (4, 2.5, 3)
+bpy.context.active_object.scale = (4, 3, 1.5)
 
-# Second floor
-bpy.ops.mesh.primitive_cube_add(location=(0, 4, 0))
+# Second floor - 7.6 x 5.6 x 2.5, stacked on the ground floor (z = 3 to 5.5)
+bpy.ops.mesh.primitive_cube_add(location=(0, 0, 4.25))
 bpy.context.active_object.name = "FirstFloor"
-bpy.context.active_object.scale = (3.8, 2.5, 2.8)
+bpy.context.active_object.scale = (3.8, 2.8, 1.25)
 
-# Roof
-bpy.ops.mesh.primitive_cube_add(location=(0, 8, 0))
+# Roof - slab on top of the second floor (z = 5.5 to 5.9)
+bpy.ops.mesh.primitive_cube_add(location=(0, 0, 5.7))
 bpy.context.active_object.name = "MainRoof"
-bpy.context.active_object.scale = (4.2, 0.4, 3.2)
+bpy.context.active_object.scale = (4.2, 3.2, 0.2)
 
-# Chattris
-for x in [-1.5, 0, 1.5]:
-    for z in [-1, 1]:
-        bpy.ops.mesh.primitive_cone_add(location=(x, 8.5, z), vertices=12)
-        bpy.context.active_object.scale = (0.8, 1.2, 0.8)
-        bpy.ops.mesh.primitive_uv_sphere_add(location=(x, 9.2, z), radius=0.5)
+# Chattris - domed pavilions on the roof, cones rising in +Z with spheres on top
+for x in [-3, 3]:
+    for y in [-2.2, 2.2]:
+        bpy.ops.mesh.primitive_cone_add(location=(x, y, 6.5), vertices=12)
+        bpy.context.active_object.scale = (0.8, 0.8, 0.6)
+        bpy.ops.mesh.primitive_uv_sphere_add(location=(x, y, 7.35), radius=0.5)
 
 # Material
 mat = bpy.data.materials.new(name="HaveliWall")
@@ -704,34 +751,34 @@ print("Created haveli")
 '''
 
     def _generate_character_script(self, custom: str) -> str:
-        """Generate human character script."""
+        """Generate human character script. Z-up, metres, feet at z = 0."""
         return '''
 import bpy
 
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete()
 
-# Head
-bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 1.65, 0), radius=0.22)
+# Head - top of the figure at z = 1.87
+bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 0, 1.65), radius=0.22)
 bpy.context.active_object.name = "Head"
 
-# Torso
-bpy.ops.mesh.primitive_cube_add(location=(0, 1.1, 0))
+# Torso - 0.9 wide x 0.44 deep x 1.1 tall (z = 0.55 to 1.65)
+bpy.ops.mesh.primitive_cube_add(location=(0, 0, 1.1))
 bpy.context.active_object.name = "Torso"
-bpy.context.active_object.scale = (0.45, 0.55, 0.22)
+bpy.context.active_object.scale = (0.45, 0.22, 0.55)
 
 # Shoulders
-bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 1.25, 0), radius=0.25)
+bpy.ops.mesh.primitive_uv_sphere_add(location=(0, 0, 1.25), radius=0.25)
 bpy.context.active_object.name = "Shoulders"
-bpy.context.active_object.scale = (1, 0.4, 0.8)
+bpy.context.active_object.scale = (1, 0.8, 0.4)
 
-# Arms
+# Arms - cylinders along Z (upper at z = 0.95, lower at z = 0.55)
 for x in [-0.45, 0.45]:
-    bpy.ops.mesh.primitive_cylinder_add(location=(x, 0.95, 0), radius=0.08, depth=0.35)
-    bpy.ops.mesh.primitive_cylinder_add(location=(x, 0.55, 0), radius=0.07, depth=0.35)
+    bpy.ops.mesh.primitive_cylinder_add(location=(x, 0, 0.95), radius=0.08, depth=0.35)
+    bpy.ops.mesh.primitive_cylinder_add(location=(x, 0, 0.55), radius=0.07, depth=0.35)
 
-# Dhoti
-bpy.ops.mesh.primitive_cylinder_add(location=(0, 0.55, 0), radius=0.25, depth=0.8)
+# Dhoti - from the ground (z = 0) to z = 1.1
+bpy.ops.mesh.primitive_cylinder_add(location=(0, 0, 0.55), radius=0.25, depth=1.1)
 bpy.context.active_object.name = "Dhoti"
 
 # Skin material
@@ -755,6 +802,13 @@ for obj in bpy.data.objects:
 
 print("Created Indian character")
 '''
+
+    async def _execute_blender_code(self, args: dict) -> dict:
+        """Run arbitrary Blender Python code supplied by the LLM."""
+        code = args.get("code", "")
+        if not code.strip():
+            return {"success": False, "error": "No code supplied."}
+        return self.model_builder.create_mesh(code)
 
     async def _modify_model(self, args: dict) -> dict:
         """Modify existing model."""
@@ -827,37 +881,100 @@ bpy.ops.wm.save_mainfile(filepath=output)
         return result
 
     async def _import_from_url(self, args: dict) -> dict:
-        """Import model from URL."""
+        """Import model from URL, normalised to 1 m longest side, standing on z = 0."""
         url = args.get("url", "")
         name = args.get("name", "imported")
+        target_size = float(args.get("target_size", 1.0) or 1.0)
 
         ext = url.split(".")[-1].lower().split("?")[0]
         if ext not in ["glb", "gltf", "obj", "fbx", "stl"]:
             ext = "glb"
 
+        # Blender import operator per format (STL lives under import_mesh, not import_scene)
+        import_ops = {
+            "glb": "bpy.ops.import_scene.gltf",
+            "gltf": "bpy.ops.import_scene.gltf",
+            "obj": "bpy.ops.import_scene.obj",
+            "fbx": "bpy.ops.import_scene.fbx",
+            "stl": "bpy.ops.import_mesh.stl",
+        }
+        import_op = import_ops[ext]
+
         local_path = self.config.paths.temp_dir / f"{name}.{ext}"
         output_path = self.config.paths.output_dir / f"{name}.blend"
+        max_bytes = 100 * 1024 * 1024  # 100 MB download cap
 
         try:
-            # Download file
+            # Download file (chunked, with a size cap)
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=120) as response:
                 with open(local_path, "wb") as f:
-                    f.write(response.read())
+                    downloaded = 0
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        downloaded += len(chunk)
+                        if downloaded > max_bytes:
+                            raise ValueError(f"Download exceeds {max_bytes // (1024 * 1024)} MB limit")
+                        f.write(chunk)
 
-            # Import to Blender
-            importer = "gltf" if ext in ["glb", "gltf"] else ext
-            script = f'''
-import bpy
-bpy.ops.import_scene.{importer}("{local_path}")
-bpy.ops.wm.save_mainfile(filepath="{output_path}")
-'''
-            self.model_builder.create_mesh(script)
-            return {"success": True, "output": str(output_path)}
+            # Import to Blender, then normalise: longest side -> target_size,
+            # origin at bottom centre, lowest point on the ground (z = 0).
+            script = self._build_import_script(str(local_path), import_op, str(output_path), target_size)
+            result = self.model_builder.create_mesh(script)
+            return {"success": result.get("success", False), "output": result.get("output", str(output_path)), "error": result.get("error", "")}
 
         except Exception as e:
             self.logger.error(f"Import failed: {e}")
             return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def _build_import_script(local_path: str, import_op: str, output_path: str, target_size: float) -> str:
+        """Blender script: import a downloaded model file and normalise it.
+
+        Normalisation: longest side becomes target_size (metres) and the
+        lowest point is moved onto the ground (z = 0). Kept as a separate
+        method so tests can verify it without downloading anything.
+        """
+        return f'''
+import bpy
+from mathutils import Vector
+
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete()
+
+{import_op}(filepath="{local_path}")
+
+meshes = [o for o in bpy.context.selected_objects if o.type == 'MESH']
+if not meshes:
+    raise RuntimeError("Import produced no mesh objects")
+
+def bounds(objs):
+    lo = Vector((1e9, 1e9, 1e9))
+    hi = Vector((-1e9, -1e9, -1e9))
+    for o in objs:
+        for corner in o.bound_box:
+            w = o.matrix_world @ Vector(corner)
+            lo = Vector((min(lo.x, w.x), min(lo.y, w.y), min(lo.z, w.z)))
+            hi = Vector((max(hi.x, w.x), max(hi.y, w.y), max(hi.z, w.z)))
+    return lo, hi
+
+lo, hi = bounds(meshes)
+size = hi - lo
+longest = max(size.x, size.y, size.z)
+if longest > 0:
+    s = {target_size} / longest
+    for o in meshes:
+        o.scale = (o.scale.x * s, o.scale.y * s, o.scale.z * s)
+
+bpy.context.view_layer.update()
+lo, hi = bounds(meshes)
+for o in meshes:
+    o.location.z -= lo.z
+
+bpy.ops.wm.save_mainfile(filepath="{output_path}")
+'''
 
     async def _get_scene_info(self) -> dict:
         """Get scene information."""

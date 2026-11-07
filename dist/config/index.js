@@ -13,7 +13,7 @@ export function getConfig() {
     const baseDir = getEnv('BLENDER_MCP_DIR', `${homeDir}/Desktop/BLENDER-MCP`);
     return {
         name: 'blender-copilot',
-        version: '1.0.0',
+        version: '1.1.0',
         debug: getEnv('BLENDER_MCP_DEBUG', 'false').toLowerCase() === 'true',
         blender: {
             executable: getEnv('BLENDER_EXECUTABLE', 'blender'),

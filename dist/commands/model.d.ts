@@ -7,6 +7,7 @@ export interface ModelResult {
     output?: string;
     error?: string;
     texture?: string;
+    stdout?: string;
 }
 export declare class ModelBuilder {
     private blender;

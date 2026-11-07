@@ -13,6 +13,7 @@ export interface ModelResult {
   output?: string;
   error?: string;
   texture?: string;
+  stdout?: string;
 }
 
 export class ModelBuilder {
@@ -54,10 +55,10 @@ export class ModelBuilder {
         this.logger.info(`Model saved to: ${outputPath}`);
         // Open in Blender (non-blocking)
         this.openInBlender(outputPath);
-        return { success: true, output: outputPath };
+        return { success: true, output: outputPath, stdout: result.stdout?.slice(-2000) };
       } else {
         this.logger.error(`Blender script failed: ${result.error}`);
-        return { success: false, error: result.error };
+        return { success: false, error: result.error, stdout: result.stdout?.slice(-2000) };
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -72,7 +73,7 @@ export class ModelBuilder {
     }
   }
 
-  private runBlender(scriptPath: string): Promise<{ success: boolean; error?: string }> {
+  private runBlender(scriptPath: string): Promise<{ success: boolean; error?: string; stdout?: string }> {
     return new Promise((resolve) => {
       const args = ['--background', '--python', scriptPath];
       this.logger.debug(`Running: ${this.blender.executable} ${args.join(' ')}`);
@@ -94,24 +95,24 @@ export class ModelBuilder {
 
       const timeout = setTimeout(() => {
         proc.kill();
-        resolve({ success: false, error: 'Execution timed out' });
+        resolve({ success: false, error: 'Execution timed out', stdout });
       }, this.blender.timeout * 1000);
 
       proc.on('close', (code) => {
         clearTimeout(timeout);
         if (code === 0) {
-          resolve({ success: true });
+          resolve({ success: true, stdout });
         } else {
-          resolve({ success: false, error: stderr || `Process exited with code ${code}` });
+          resolve({ success: false, error: stderr || `Process exited with code ${code}`, stdout });
         }
       });
 
       proc.on('error', (error) => {
         clearTimeout(timeout);
         if (error.message.includes('ENOENT')) {
-          resolve({ success: false, error: 'Blender executable not found' });
+          resolve({ success: false, error: 'Blender executable not found', stdout });
         } else {
-          resolve({ success: false, error: error.message });
+          resolve({ success: false, error: error.message, stdout });
         }
       });
     });

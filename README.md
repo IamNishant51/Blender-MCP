@@ -31,6 +31,27 @@ Blender MCP enables AI assistants to control Blender programmatically, allowing 
 
 ---
 
+## What's new in 1.1.0
+
+- **Axis fix:** all five built-in templates were rewritten Z-up, in metres,
+  with every part standing on the ground (z = 0). Previously the templates
+  were written Y-up, so towers ran sideways and pillars sat underground.
+- **New tool `execute_blender_code`:** run arbitrary Blender Python (`bpy`)
+  code for any model that is not one of the five built-in templates.
+- **No more temple default:** a description that matches no template now
+  returns an honest "no template matched" error pointing at
+  `execute_blender_code`, instead of silently building a temple.
+- **`import_from_url` works:** implemented in the TypeScript server
+  (previously a stub) and fixed the STL operator in the Python server
+  (`bpy.ops.import_mesh.stl`). Imported models are normalised to 1 m
+  longest side and placed on the ground.
+- **Logs go to stderr:** server logs no longer pollute the MCP protocol
+  stream on stdout.
+- **Real tests:** bounding-box tests for every template
+  (`npm test`, `pytest`, `tests/verify_blender.py` with real Blender).
+
+---
+
 ## Installation
 
 ```bash
@@ -50,6 +71,7 @@ npx blender-mcp
 | Tool | Description |
 |------|-------------|
 | `create_complex_model` | Build complex 3D models with internet search and detailed planning. Supports Indian themes: temples, vehicles, food, characters, buildings, and more. |
+| `execute_blender_code` | Run arbitrary Blender Python (`bpy`) code. Use for any model that is not one of the five built-in templates. Z-up, dimensions in metres, ground at z = 0. |
 | `modify_model` | Modify existing 3D models - change colors, materials, scale, rotation, or apply effects. |
 | `apply_texture` | Apply procedural materials to 3D objects (wood, marble, stone, metal, etc.). |
 | `search_models` | Search the entire internet for 3D models across multiple sources. |
@@ -96,7 +118,7 @@ npm install -g blender-mcp && blender-mcp
 
 ## Built-in Model Templates
 
-The server includes procedural generation for various Indian-themed 3D models:
+The server includes procedural generation for various Indian-themed 3D models. All templates are Z-up, dimensioned in metres, and stand on the ground (z = 0):
 
 | Category | Description |
 |----------|-------------|

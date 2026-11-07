@@ -1,6 +1,6 @@
 {
   "name": "blender-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server for controlling Blender via AI assistants",
   "author": "Blender MCP Team",
   "license": "MIT",
@@ -12,7 +12,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
-    "test": "echo \"No tests yet\" && exit 0",
+    "test": "npm run build && node tests/check_ts_templates.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

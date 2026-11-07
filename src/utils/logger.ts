@@ -39,21 +39,23 @@ export class Logger {
     return `${time} | ${color}${level.toUpperCase().padEnd(5)}${RESET} | [${this.name}] ${message}`;
   }
 
+  // All log levels write to stderr: stdout is the MCP protocol stream
+  // (JSON-RPC), and log lines there corrupt client communication.
   debug(message: string, ...args: unknown[]): void {
     if (this.shouldLog('debug')) {
-      console.debug(this.formatMessage('debug', message), ...args);
+      console.error(this.formatMessage('debug', message), ...args);
     }
   }
 
   info(message: string, ...args: unknown[]): void {
     if (this.shouldLog('info')) {
-      console.info(this.formatMessage('info', message), ...args);
+      console.error(this.formatMessage('info', message), ...args);
     }
   }
 
   warn(message: string, ...args: unknown[]): void {
     if (this.shouldLog('warn')) {
-      console.warn(this.formatMessage('warn', message), ...args);
+      console.error(this.formatMessage('warn', message), ...args);
     }
   }
 

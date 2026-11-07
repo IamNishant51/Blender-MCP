@@ -38,8 +38,8 @@ def setup_logging(
     # Clear existing handlers
     logger.handlers.clear()
 
-    # Console handler
-    console = logging.StreamHandler(sys.stdout)
+    # Console handler (stderr: stdout is the MCP protocol stream, never log to it)
+    console = logging.StreamHandler(sys.stderr)
     console.setLevel(logging.DEBUG if debug else logging.INFO)
     console.setFormatter(ColoredFormatter(
         fmt="%(asctime)s | %(levelname)-18s | %(message)s",

@@ -9,6 +9,9 @@ import { config } from './config/index.js';
 import { SearchService } from './commands/search.js';
 import { ModelBuilder, getMaterialScript } from './commands/model.js';
 import { generateModelScript } from './commands/generators.js';
+import { buildImportScript, IMPORT_OPERATORS, SUPPORTED_IMPORT_FORMATS } from './commands/import.js';
+import { writeFileSync } from 'fs';
+import { join } from 'path';
 class BlenderMCPServer {
     config;
     logger = createLogger('server', config.debug);
@@ -27,7 +30,7 @@ class BlenderMCPServer {
             tools: [
                 {
                     name: 'create_complex_model',
-                    description: 'CREATE: Build complex 3D models with internet search + detailed planning.',
+                    description: 'CREATE: Build complex 3D models with internet search + detailed planning. Built-in templates only: temple/mandir, auto-rickshaw/vehicle, thali/food, haveli/palace/building, person/human/character. For anything else use execute_blender_code.',
                     inputSchema: {
                         type: 'object',
                         properties: {
@@ -35,6 +38,17 @@ class BlenderMCPServer {
                             customization: { type: 'string', description: 'Customize: colors, materials, scale' },
                         },
                         required: ['description'],
+                    },
+                },
+                {
+                    name: 'execute_blender_code',
+                    description: 'CODE: Run arbitrary Blender Python (bpy) code in a headless Blender and save the resulting scene. Use this for ANY model that is not one of the five built-in templates (temple/mandir, auto-rickshaw/vehicle, thali/food, haveli/palace/building, person/human/character). Write Z-up code: Z is height, ground is z = 0, all dimensions in metres, every part\'s lowest point at z >= 0. The script runs in a fresh empty scene; the result includes Blender\'s stdout/stderr and the output .blend path. Fix errors from the returned stderr and call again.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            code: { type: 'string', description: 'Blender Python code using bpy (imports bpy itself if needed)' },
+                        },
+                        required: ['code'],
                     },
                 },
                 {
@@ -112,6 +126,8 @@ class BlenderMCPServer {
                 return { success: true, found: textureResults.length, results: textureResults };
             case 'create_complex_model':
                 return this.createModel(args);
+            case 'execute_blender_code':
+                return this.executeBlenderCode(args);
             case 'modify_model':
                 return this.modifyModel(args);
             case 'apply_texture':
@@ -131,6 +147,14 @@ class BlenderMCPServer {
         const searchResults = await this.searchService.searchModels(description);
         this.logger.info(`Phase 2: Building model`);
         const script = generateModelScript(description, customization);
+        if (!script) {
+            return {
+                success: false,
+                description,
+                customization,
+                error: 'No built-in template matches this description. The built-in templates are: temple/mandir, auto-rickshaw/vehicle, thali/food, haveli/palace/building, person/human/character. For anything else, use the execute_blender_code tool with your own bpy code (Z-up, dimensions in metres, ground at z = 0), or use search_models and import_from_url to bring in an existing model.',
+            };
+        }
         const result = await this.modelBuilder.createMesh(script);
         return {
             success: result.success,
@@ -141,7 +165,16 @@ class BlenderMCPServer {
                 creation: result.success ? 'completed' : 'failed',
             },
             output: result.output || '',
+            stdout: result.stdout || '',
+            error: result.error || '',
         };
+    }
+    async executeBlenderCode(args) {
+        const code = args.code || '';
+        if (!code.trim()) {
+            return { success: false, error: 'No code supplied.' };
+        }
+        return this.modelBuilder.createMesh(code);
     }
     async modifyModel(args) {
         const existing = args.existing_model;
@@ -207,8 +240,62 @@ bpy.ops.wm.save_mainfile(filepath=output)
         const result = await this.modelBuilder.createMesh(script);
         return { ...result, texture };
     }
-    async importFromUrl(_args) {
-        return { success: false, error: 'URL import not yet implemented' };
+    async importFromUrl(args) {
+        const url = args.url || '';
+        const name = (args.name || 'imported').replace(/[^A-Za-z0-9_-]/g, '_');
+        const targetSize = Number(args.target_size) || 1.0;
+        if (!url) {
+            return { success: false, error: 'No URL supplied.' };
+        }
+        const ext = url.split('.').pop()?.toLowerCase().split('?')[0] ?? 'glb';
+        const format = SUPPORTED_IMPORT_FORMATS.includes(ext) ? ext : 'glb';
+        const importOp = IMPORT_OPERATORS[format];
+        const localPath = join(this.config.paths.tempDir, `${name}.${format}`);
+        const outputPath = join(this.config.paths.outputDir, `${name}.blend`);
+        const maxBytes = 100 * 1024 * 1024; // 100 MB download cap
+        try {
+            // Download the file (chunked, with a size cap)
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 120_000);
+            let response;
+            try {
+                response = await fetch(url, {
+                    headers: { 'User-Agent': 'Mozilla/5.0' },
+                    signal: controller.signal,
+                });
+            }
+            finally {
+                clearTimeout(timeout);
+            }
+            if (!response.ok || !response.body) {
+                return { success: false, error: `Download failed: HTTP ${response.status}` };
+            }
+            const reader = response.body.getReader();
+            const chunks = [];
+            let downloaded = 0;
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done)
+                    break;
+                downloaded += value.length;
+                if (downloaded > maxBytes) {
+                    return { success: false, error: 'Download exceeds 100 MB limit' };
+                }
+                chunks.push(value);
+            }
+            const data = Buffer.concat(chunks);
+            writeFileSync(localPath, data);
+            // Import to Blender, then normalise: longest side -> targetSize,
+            // origin at bottom centre, lowest point on the ground (z = 0).
+            const script = buildImportScript(localPath, importOp, outputPath, targetSize);
+            const result = await this.modelBuilder.createMesh(script);
+            return { success: result.success, output: result.output || outputPath, stdout: result.stdout || '', error: result.error || '' };
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Import failed: ${message}`);
+            return { success: false, error: message };
+        }
     }
     async getSceneInfo() {
         const script = `import bpy, json; objs = [{'name': o.name, 'type': o.type} for o in bpy.data.objects]; print(json.dumps({'objects': objs}))`;
