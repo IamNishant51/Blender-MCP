@@ -330,6 +330,12 @@ def _bounds_of(objs):
                 f"bpy.ops.mesh.primitive_torus_add(location=_centre, major_radius=0.375, minor_radius=0.125)\n"
                 f"_obj = bpy.context.active_object\n"
                 f"_obj.scale = ({size[0]!r}, {size[1]!r}, {size[2] / 0.25!r})")
+        # Curved primitives are flat-shaded by default, which reads as
+        # faceted "disco ball" segments under studio light (v1.3.0 demo
+        # sneaker toe/heel). Smooth-shade them so they read as moulded
+        # parts. Cubes stay flat-shaded for crisp edges.
+        if kind != "cube":
+            lines.append("for _p in _obj.data.polygons: _p.use_smooth = True")
         if any(rot):
             lines.append(
                 f"_obj.rotation_euler = (math.radians({rot[0]!r}), math.radians({rot[1]!r}), "

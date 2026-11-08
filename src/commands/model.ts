@@ -153,13 +153,13 @@ export class ModelBuilder {
    * `outputPrefix` is a file path prefix; each view renders to
    * `<prefix>_<view>.png` (a trailing .png/.blend extension is stripped).
    */
-  async renderModel(blendPath: string, outputPrefix: string, views: string[]): Promise<ModelResult> {
+  async renderModel(blendPath: string, outputPrefix: string, views: string[], options: import('./render.js').RenderOptions = {}): Promise<ModelResult> {
     if (!existsSync(blendPath)) {
       return { success: false, error: `Blend file not found: ${blendPath}` };
     }
     let script: string;
     try {
-      script = buildRenderScript(views);
+      script = buildRenderScript(views, options);
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -172,18 +172,28 @@ export class ModelBuilder {
     const scriptPath = join(this.paths.tempDir, `render_${Date.now()}.py`);
     writeFileSync(scriptPath, script);
     try {
-      // Renders are slow on software GL (~1 min/view at 960x720); give
-      // them at least 600 s no matter what the build timeout is.
+      // Renders are slow on software GL (~1 min/view at 960x720); Cycles
+      // on CPU is slower still — give them at least 600 s (EEVEE) or
+      // 1800 s (Cycles) no matter what the build timeout is.
       const result = await this.runBlenderArgs([
         '--background', blendPath, '--python', scriptPath, '--', prefix, ...views,
-      ], Math.max(this.blender.timeout, 600));
+      ], Math.max(this.blender.timeout, options.engine === 'CYCLES' ? 1800 : 600));
       if (!result.success) {
         this.logger.error(`Render failed: ${result.error}`);
         return { success: false, error: result.error, stdout: result.stdout?.slice(-2000) };
       }
+      // The script prints RENDER_DONE_JSON with every render it wrote
+      // (views + turntable frames). Trust that list — rebuilding it from
+      // `views` alone silently dropped the turntable frames (they were
+      // rendered to disk but never reported).
+      const doneMatch = result.stdout?.match(/RENDER_DONE_JSON:(\{.*\})/);
+      let listed: Array<{ view: string; path: string }> = [];
+      if (doneMatch) {
+        try { listed = (JSON.parse(doneMatch[1]).renders ?? []) as Array<{ view: string; path: string }>; } catch { listed = []; }
+      }
+      const toCheck = listed.length > 0 ? listed : views.map((view) => ({ view, path: `${prefix}_${view}.png` }));
       const renders: Array<{ view: string; path: string; size_bytes: number }> = [];
-      for (const view of views) {
-        const pngPath = `${prefix}_${view}.png`;
+      for (const { view, path: pngPath } of toCheck) {
         if (!existsSync(pngPath)) {
           return { success: false, error: `Render failed: ${pngPath} was not written by Blender`, stdout: result.stdout?.slice(-2000) };
         }
@@ -220,7 +230,12 @@ export class ModelBuilder {
       }, (timeoutSeconds ?? this.blender.timeout) * 1000);
       proc.on('close', (code) => {
         clearTimeout(timeout);
-        if (code === 0) resolve({ success: true, stdout });
+        // Blender exits 0 even when the --python script raises: the
+        // traceback goes to stderr and nothing is saved. A traceback in
+        // stderr is a failure, whatever the exit code says — otherwise a
+        // broken script reports success:true with no .blend (the v1.1.0
+        // false-success class of bug).
+        if (code === 0 && !stderr.includes('Traceback (most recent call last)')) resolve({ success: true, stdout });
         else resolve({ success: false, error: stderr || `Process exited with code ${code}`, stdout });
       });
       proc.on('error', (error) => {
@@ -281,6 +296,17 @@ export const MATERIALS: Record<string, { baseColor: [number, number, number, num
   stone: { baseColor: [0.6, 0.58, 0.55, 1], roughness: 0.85, metallic: 0.0 },
   sandstone: { baseColor: [0.85, 0.75, 0.6, 1], roughness: 0.9, metallic: 0.0 },
   terracotta: { baseColor: [0.8, 0.45, 0.3, 1], roughness: 0.85, metallic: 0.0 },
+  black: { baseColor: [0.02, 0.02, 0.02, 1], roughness: 0.15, metallic: 0.0 },
+  smooth_leather: { baseColor: [0.16, 0.12, 0.10, 1], roughness: 0.7, metallic: 0.0 },
+  brown_leather: { baseColor: [0.32, 0.20, 0.12, 1], roughness: 0.7, metallic: 0.0 },
+  black_leather: { baseColor: [0.05, 0.05, 0.05, 1], roughness: 0.7, metallic: 0.0 },
+  matte_plastic: { baseColor: [0.05, 0.05, 0.05, 1], roughness: 0.55, metallic: 0.0 },
+  rubber: { baseColor: [0.03, 0.03, 0.03, 1], roughness: 0.95, metallic: 0.0 },
+  white_leather: { baseColor: [0.93, 0.92, 0.90, 1], roughness: 0.5, metallic: 0.0 },
+  amber_liquid: { baseColor: [0.85, 0.45, 0.12, 1], roughness: 0.05, metallic: 0.0 },
+  polished_steel: { baseColor: [0.85, 0.85, 0.86, 1], roughness: 0.25, metallic: 0.9 },
+  white: { baseColor: [0.95, 0.95, 0.95, 1], roughness: 0.4, metallic: 0.0 },
+  accent_red: { baseColor: [0.65, 0.08, 0.08, 1], roughness: 0.5, metallic: 0.0 },
 };
 
 function nodeHeader(name: string): string {
@@ -360,7 +386,9 @@ links.new(voronoi.outputs["Distance"], ramp.inputs["Fac"])
 links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
 bsdf.inputs["Roughness"].default_value = 0.2
 bsdf.inputs["Subsurface Weight"].default_value = 0.1
-bsdf.inputs["Subsurface Color"].default_value = ${JSON.stringify([...base, 1])}
+# NOTE: Blender 4.2's Principled BSDF has no "Subsurface Color" input —
+# subsurface takes its colour from Base Color (the Voronoi ramp above).
+# Setting it raises KeyError and kills the whole build.
 `;
 }
 
@@ -404,7 +432,8 @@ function skinScript(name: string): string {
 bsdf.inputs["Base Color"].default_value = (0.55, 0.35, 0.25, 1)
 bsdf.inputs["Roughness"].default_value = 0.6
 bsdf.inputs["Subsurface Weight"].default_value = 0.4
-bsdf.inputs["Subsurface Color"].default_value = (0.45, 0.2, 0.12, 1)
+# NOTE: Blender 4.2's Principled BSDF has no "Subsurface Color" input —
+# subsurface takes its colour from Base Color. Setting it raises KeyError.
 bsdf.inputs["Subsurface Radius"].default_value = (1.0, 0.2, 0.1)
 `;
 }
@@ -415,6 +444,81 @@ function sandstoneScript(name: string, dark: number[] = [0.75, 0.6, 0.35], light
     + `
 links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
 bsdf.inputs["Roughness"].default_value = 0.9
+`;
+}
+
+function smoothLeatherScript(name: string, base: number[] = [0.16, 0.12, 0.10]): string {
+  // Smooth leather for straps / cushions — deliberately NO noise nodes.
+  // v1.3.0 fix: the v1.3.0 smartwatch strap used `fabric` (Noise -> Bump
+  // at scale 25, Generated coordinates). On a 22 mm strap that noise reads
+  // as a scribbled artifact under studio light. A real strap is smooth at
+  // this scale: plain Principled + a little sheen, nothing else.
+  return nodeHeader(name) + `
+bsdf.inputs["Base Color"].default_value = ${JSON.stringify([...base, 1])}
+bsdf.inputs["Roughness"].default_value = 0.7
+bsdf.inputs["Sheen Weight"].default_value = 0.3
+bsdf.inputs["Sheen Roughness"].default_value = 0.6
+`;
+}
+
+function mattePlasticScript(name: string, base: number[] = [0.05, 0.05, 0.05]): string {
+  return nodeHeader(name) + `
+bsdf.inputs["Base Color"].default_value = ${JSON.stringify([...base, 1])}
+bsdf.inputs["Roughness"].default_value = 0.55
+bsdf.inputs["Metallic"].default_value = 0.0
+`;
+}
+
+function rubberScript(name: string): string {
+  return nodeHeader(name) + `
+bsdf.inputs["Base Color"].default_value = (0.03, 0.03, 0.03, 1)
+bsdf.inputs["Roughness"].default_value = 0.95
+bsdf.inputs["Metallic"].default_value = 0.0
+`;
+}
+
+function whiteLeatherScript(name: string): string {
+  return nodeHeader(name) + `
+bsdf.inputs["Base Color"].default_value = (0.93, 0.92, 0.90, 1)
+bsdf.inputs["Roughness"].default_value = 0.5
+bsdf.inputs["Sheen Weight"].default_value = 0.5
+bsdf.inputs["Sheen Roughness"].default_value = 0.5
+`;
+}
+
+function amberLiquidScript(name: string): string {
+  return nodeHeader(name) + `
+bsdf.inputs["Base Color"].default_value = (0.85, 0.45, 0.12, 1)
+bsdf.inputs["Roughness"].default_value = 0.05
+bsdf.inputs["Transmission Weight"].default_value = 0.85
+bsdf.inputs["IOR"].default_value = 1.33
+`;
+}
+
+function polishedSteelScript(name: string): string {
+  // Polished steel for small metal parts (yokes, rings, crowns) — NO
+  // noise nodes. The `metal`/`steel` builders put Noise into roughness
+  // + bump, which reads as a streaky/scratchy strip on a 5 mm yoke.
+  return nodeHeader(name) + `
+bsdf.inputs["Base Color"].default_value = (0.85, 0.85, 0.86, 1)
+bsdf.inputs["Roughness"].default_value = 0.25
+bsdf.inputs["Metallic"].default_value = 0.9
+`;
+}
+
+function whiteScript(name: string): string {
+  return nodeHeader(name) + `
+bsdf.inputs["Base Color"].default_value = (0.95, 0.95, 0.95, 1)
+bsdf.inputs["Roughness"].default_value = 0.4
+bsdf.inputs["Metallic"].default_value = 0.0
+`;
+}
+
+function accentRedScript(name: string): string {
+  return nodeHeader(name) + `
+bsdf.inputs["Base Color"].default_value = (0.65, 0.08, 0.08, 1)
+bsdf.inputs["Roughness"].default_value = 0.5
+bsdf.inputs["Metallic"].default_value = 0.0
 `;
 }
 
@@ -437,6 +541,16 @@ const NODE_BUILDERS: Record<string, (name: string) => string> = {
   brass: (n) => metalScript(n, [0.85, 0.7, 0.3]),
   steel: (n) => metalScript(n, [0.85, 0.85, 0.86], 0.9, 0.3, 0.4),
   fabric: fabricScript,
+  smooth_leather: smoothLeatherScript,
+  brown_leather: (n) => smoothLeatherScript(n, [0.32, 0.20, 0.12]),
+  black_leather: (n) => smoothLeatherScript(n, [0.05, 0.05, 0.05]),
+  matte_plastic: mattePlasticScript,
+  rubber: rubberScript,
+  white_leather: whiteLeatherScript,
+  amber_liquid: amberLiquidScript,
+  polished_steel: polishedSteelScript,
+  white: whiteScript,
+  accent_red: accentRedScript,
   glass: glassScript,
   skin: skinScript,
   sandstone: sandstoneScript,
@@ -493,7 +607,7 @@ for obj in targets:
 // ---------------------------------------------------------------------------
 
 export const POLYHAVEN_API = 'https://api.polyhaven.com';
-export const POLYHAVEN_USER_AGENT = 'blender-mcp/1.2.0 (https://github.com/IamNishant51/Blender-MCP)';
+export const POLYHAVEN_USER_AGENT = 'blender-mcp/1.3.0 (https://github.com/IamNishant51/Blender-MCP)';
 export const POLYHAVEN_LICENCE = 'CC0';
 
 export interface PolyHavenMaps {

@@ -34,6 +34,24 @@ from blender_mcp.materials import (
 )
 from blender_mcp.spec import parse_spec, validate_spec, build_from_spec
 from blender_mcp.render import build_render_script, RENDER_VIEWS
+from blender_mcp.generate import (
+    run_generate_3d,
+    build_meshy_text_request,
+    build_meshy_image_request,
+    build_tripo_text_request,
+    build_tripo_image_request,
+)
+from blender_mcp.details import get_detail_script, DETAIL_TYPES
+from blender_mcp.products import get_product_script, get_retrieved_product_script, PRODUCTS
+from blender_mcp.retrieve import retrieve_asset
+from blender_mcp.critique import (
+    build_critique_script,
+    parse_critique_json,
+    build_critique_prompt,
+    png_decodes,
+    MAX_REFINE_ROUNDS,
+    CRITIQUE_NOTE,
+)
 
 
 # ==============================================================================
@@ -241,7 +259,12 @@ class ModelBuilder:
                 text=True,
                 timeout=timeout if timeout is not None else self.config.blender.timeout,
             )
-            if result.returncode == 0:
+            # Blender exits 0 even when the --python script raises: the
+            # traceback goes to stderr and nothing is saved. A traceback in
+            # stderr is a failure, whatever the exit code says — otherwise a
+            # broken script reports success:true with no .blend (the v1.1.0
+            # false-success class of bug).
+            if result.returncode == 0 and "Traceback (most recent call last)" not in result.stderr:
                 return {"success": True, "stdout": result.stdout}
             return {
                 "success": False,
@@ -337,19 +360,22 @@ class ModelBuilder:
             except OSError:
                 pass
 
-    def render_model(self, blend_path: str, output_prefix: str, views: list) -> dict:
+    def render_model(self, blend_path: str, output_prefix: str, views: list, options: dict | None = None) -> dict:
         """Render a saved .blend with the presentation preset (see render.py).
 
         Every PNG is verified to exist on disk and be non-empty before
         success is reported — a missing/empty PNG is success:false.
         ``output_prefix`` is a file path prefix; each view renders to
         ``<prefix>_<view>.png`` (a trailing .png/.blend extension is stripped).
+        ``options``: engine ('EEVEE'|'CYCLES'), samples, view_transform,
+        lens, transparent, turntable_frames, resolution, hdri_path.
         """
+        options = options or {}
         blend = Path(blend_path)
         if not blend.exists():
             return {"success": False, "error": f"Blend file not found: {blend_path}"}
         try:
-            script = build_render_script(views)
+            script = build_render_script(views, options)
         except ValueError as e:
             return {"success": False, "error": str(e)}
         prefix = re.sub(r"\.(png|blend)$", "", output_prefix, flags=re.IGNORECASE)
@@ -361,18 +387,33 @@ class ModelBuilder:
             f.write(script)
             script_path = f.name
         try:
-            # Renders are slow on software GL (~1 min/view at 960x720); give
-            # them at least 600 s no matter what the build timeout is.
+            # Renders are slow on software GL (~1 min/view at 960x720); Cycles
+            # on CPU is slower still — give them at least 600 s (EEVEE) or
+            # 1800 s (Cycles) no matter what the build timeout is.
             result = self.run_blender_args(
                 ["--background", str(blend), "--python", script_path, "--", prefix, *views],
-                timeout=max(self.config.blender.timeout, 600),
+                timeout=max(self.config.blender.timeout, 1800 if options.get("engine") == "CYCLES" else 600),
             )
             if not result["success"]:
                 self.logger.error(f"Render failed: {result['error']}")
                 return {"success": False, "error": result["error"], "stdout": result.get("stdout", "")[-2000:]}
+            # The script prints RENDER_DONE_JSON with every render it wrote
+            # (views + turntable frames). Trust that list — rebuilding it
+            # from `views` alone silently dropped the turntable frames
+            # (they were rendered to disk but never reported).
+            listed: list = []
+            m = re.search(r"RENDER_DONE_JSON:(\{.*\})", result.get("stdout", "") or "")
+            if m:
+                try:
+                    listed = json.loads(m.group(1)).get("renders", []) or []
+                except (json.JSONDecodeError, AttributeError):
+                    listed = []
+            to_check = listed if listed else [
+                {"view": v, "path": f"{prefix}_{v}.png"} for v in views
+            ]
             renders = []
-            for view in views:
-                png_path = Path(f"{prefix}_{view}.png")
+            for entry in to_check:
+                png_path = Path(entry["path"])
                 if not png_path.exists():
                     return {
                         "success": False,
@@ -386,7 +427,7 @@ class ModelBuilder:
                         "error": f"Render failed: {png_path} is empty (0 bytes)",
                         "stdout": result.get("stdout", "")[-2000:],
                     }
-                renders.append({"view": view, "path": str(png_path), "size_bytes": size})
+                renders.append({"view": entry["view"], "path": str(png_path), "size_bytes": size})
             return {"success": True, "output": str(blend), "renders": renders,
                     "stdout": result.get("stdout", "")[-2000:]}
         finally:
@@ -432,15 +473,24 @@ class BlenderMCPServer:
                 description=(
                     "RESEARCH FIRST: Research a model before any code is written. "
                     "Runs the model/texture search and returns top references "
-                    "(name, source, url) plus the part-breakdown schema. Use the "
-                    "references to work out the real parts and dimensions, then "
-                    "produce a JSON scene spec and call build_from_spec. No code "
-                    "is written before this step."
+                    "(name, source, url) plus the part-breakdown schema. PREFER A "
+                    "REAL ASSET OVER PRIMITIVES: if a Poly Haven / Sketchfab / "
+                    "Poly Pizza asset in the results fits the request, the result "
+                    "names it as recommended_path — import it with import_from_url "
+                    "instead of modelling from primitives. Optional reference_image "
+                    "(local path or URL): with a generation key (MESHY_API_KEY / "
+                    "TRIPO_API_KEY) it drives image-to-3D via generate_3d (route A); "
+                    "without one it is the visual reference the spec is built from — "
+                    "parts, proportions, colours, materials recorded in the spec "
+                    "(route B). Use the references to work out the real parts and "
+                    "dimensions, then produce a JSON scene spec and call "
+                    "build_from_spec. No code is written before this step."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "What to model, e.g. 'Bajaj auto rickshaw' or 'Indian thali'"},
+                        "reference_image": {"type": "string", "description": "Optional reference image: local file path or public URL. With a generation key it drives image-to-3D; without one it is the visual reference for the spec."},
                     },
                     "required": ["query"],
                 },
@@ -472,12 +522,21 @@ class BlenderMCPServer:
                 name="render_model",
                 description=(
                     "RENDER / LOOK: Render a saved .blend with the presentation "
-                    "preset (50 mm camera auto-framed on the bounding-box "
-                    "centre, 3-point area-light rig, sun + world light, ground "
-                    "plane) as EEVEE PNGs, one per view. Every PNG is verified "
-                    "to exist on disk and be non-empty before success is "
-                    "reported — a missing/empty PNG returns success:false, "
-                    "never success:true. Returns the PNG paths and file sizes."
+                    "preset (camera auto-framed on the bounding-box centre, "
+                    "3-point + rim area-light rig, sun + world light, ground "
+                    "plane) as PNGs, one per view. Engine EEVEE (default, fast "
+                    "previews) or CYCLES (final stills: CPU path tracer, 128-256 "
+                    "samples + OpenImageDenoise, Khronos PBR Neutral for catalogue "
+                    "shots / AgX for hero shots). Optional studio HDRI via hdri "
+                    "'polyhaven:<slug>' (CC0, verified licence; falls back to "
+                    "world+sun if the download fails), transparent-background "
+                    "product shots (Cycles Shadow Catcher + Film Transparent; "
+                    "EEVEE has no shadow catcher), turntable_frames (extra orbit "
+                    "frames, exactly 360 deg about Z). Lens: 50 mm default, "
+                    "85 mm hero, 90-105 mm macro. Every PNG is verified to exist "
+                    "on disk and be non-empty before success is reported — a "
+                    "missing/empty PNG returns success:false, never success:true. "
+                    "Returns the PNG paths and file sizes."
                 ),
                 inputSchema={
                     "type": "object",
@@ -485,8 +544,162 @@ class BlenderMCPServer:
                         "blend_path": {"type": "string", "description": "Path to the .blend file to render"},
                         "output_path": {"type": "string", "description": "Output file prefix; each view renders to <prefix>_<view>.png"},
                         "views": {"type": "array", "items": {"type": "string"}, "description": "Views to render (default [\"front\",\"side\",\"perspective\"]); allowed: front, side, back, top, perspective"},
+                        "engine": {"type": "string", "description": "EEVEE (default) or CYCLES (final stills)"},
+                        "samples": {"type": "number", "description": "Cycles samples; default 128 (keep 128-256 on CPU)"},
+                        "view_transform": {"type": "string", "description": "Khronos PBR Neutral (catalogue) or AgX (hero)"},
+                        "lens": {"type": "number", "description": "Camera lens in mm; 50 default, 85 hero, 90-105 macro"},
+                        "fill_fraction": {"type": "number", "description": "Fraction of the frame the subject fills on its binding axis; default 0.7 (exact fill-based framing — the old distance heuristic rendered small products tiny)"},
+                        "transparent": {"type": "boolean", "description": "Transparent background product shot (Cycles shadow catcher)"},
+                        "turntable_frames": {"type": "number", "description": "Extra orbit frames (0 = off); renders <prefix>_turntable_<nn>.png"},
+                        "resolution": {"type": "array", "items": {"type": "number"}, "description": "Resolution [width, height]; default EEVEE [960,720], Cycles [1280,720]"},
+                        "hdri": {"type": "string", "description": "Studio HDRI: 'polyhaven:<slug>' (CC0, auto-downloaded) or a local .hdr/.exr path. Empty = world+sun fallback."},
                     },
                     "required": ["blend_path", "output_path"],
+                },
+            ),
+            Tool(
+                name="generate_3d",
+                description=(
+                    "AI GENERATION (Meshy first, Tripo second): generate a textured "
+                    "3D model from a text prompt or a reference image, then import "
+                    "it normalised (longest side = target_size, origin at bottom, "
+                    "min z = 0). Needs the user's own API key from env var "
+                    "MESHY_API_KEY (Meshy) or TRIPO_API_KEY (Tripo) — never baked "
+                    "into source. NO KEY = the tool says so honestly and points at "
+                    "the free local path (research_model -> build_from_spec / "
+                    "execute_blender_code); it never fails silently and never "
+                    "invents a model. Meshy text-to-3D is two billed steps (preview "
+                    "20 credits + refine 10 = 30 for a textured model; "
+                    "texture:false stops after the mesh-only preview); Meshy "
+                    "image-to-3D is 30 credits; assets are kept only 3 days so the "
+                    "GLB is downloaded immediately. Tripo: text $0.20 / image $0.30 "
+                    "textured; its GLB URL expires in 5 minutes so it is downloaded "
+                    "inside the poll loop. No provider states a GLB up-axis — "
+                    "orientation/scale are verified in Blender on import. "
+                    "Hunyuan3D / Rodin are not implemented (see README)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "Text prompt (text mode). Meshy max 800 chars, Tripo max 1024."},
+                        "image_url": {"type": "string", "description": "Image mode: public image URL (Meshy also accepts a data URI here)."},
+                        "image_base64": {"type": "string", "description": "Image mode (Meshy only): raw base64 image data, or a data:image/...;base64,... URI."},
+                        "provider": {"type": "string", "description": "meshy (default) or tripo"},
+                        "texture": {"type": "boolean", "description": "Textured model (default true). Meshy text mode with texture:false stops after the mesh-only preview draft."},
+                        "target_size": {"type": "number", "description": "Longest side in metres after import normalisation; default 1.0"},
+                        "target_polycount": {"type": "number", "description": "Meshy target polycount, 100-300000, default 30000"},
+                        "timeout_seconds": {"type": "number", "description": "Poll budget in seconds; default 600. A timeout does NOT cancel the provider task — keep the task_id and poll again."},
+                    },
+                    "required": [],
+                },
+            ),
+            Tool(
+                name="retrieve_asset",
+                description=(
+                    "FREE REAL-ASSET RETRIEVAL: try a real model before building "
+                    "from primitives. Searches Poly Haven (CC0, no key, direct "
+                    "downloads) by product or query and downloads the 1k glTF "
+                    "package into the asset cache. Known good: smartwatch -> "
+                    "Poly Haven 'digital_wrist_watch' (vintage digital watch, "
+                    "CC0). Poly Pizza search needs the user's own "
+                    "POLY_PIZZA_API_KEY env var (its search endpoint returns "
+                    "HTTP 401 without a key since 2026-11-08) — without one the "
+                    "tool says so honestly and Poly Haven is searched instead. "
+                    "No account is ever created. Assets are never committed to "
+                    "the repo (binary files cannot go through snapshot-push). "
+                    "On success returns the glTF path + licence + source URL; "
+                    "import it with build_product (source 'retrieved') or "
+                    "import_from_url. On failure it says exactly why — use "
+                    "build_product (procedural) instead of a wrong asset."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "product": {"type": "string", "description": "Product with a known good asset, e.g. 'smartwatch'"},
+                        "query": {"type": "string", "description": "Free-text search, e.g. 'headphones' (Poly Haven catalogue)"},
+                        "source": {"type": "string", "description": "polyhaven (default) or poly_pizza (needs POLY_PIZZA_API_KEY)"},
+                        "resolution": {"type": "string", "description": "Download resolution; default '1k'"},
+                    },
+                    "required": [],
+                },
+            ),
+            Tool(
+                name="build_product",
+                description=(
+                    "PROPER PRODUCT BUILD: build one of the catalogue products "
+                    "with real curves, not stacked primitives — headphones "
+                    "(arched band + padded cups), sneaker (lofted sole with "
+                    "toe spring + bezier laces through eyelets), perfume "
+                    "(bevelled glass, seated gold cap, NOIR label), smartwatch "
+                    "(bevelled case, real dial with markers + hands, curved "
+                    "strap). Source 'auto' (default) prefers a retrieved real "
+                    "asset for products that have one (smartwatch -> Poly "
+                    "Haven CC0 digital watch) and falls back to the procedural "
+                    "builder with a note; 'procedural' forces the builder; "
+                    "'retrieved' fails if no asset is available. Returns the "
+                    "saved .blend path, object names, bounding boxes and min z."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "product": {"type": "string", "description": "Product to build: headphones, sneaker, perfume, smartwatch"},
+                        "source": {"type": "string", "description": "auto (default), procedural, or retrieved"},
+                        "target_size": {"type": "number", "description": "Retrieved assets only: longest side in metres after normalisation; default 0.22"},
+                    },
+                    "required": ["product"],
+                },
+            ),
+            Tool(
+                name="add_detail",
+                description=(
+                    "DETAIL HELPERS: apply one manufactured detail to a target "
+                    "object in a saved .blend (or the current build): "
+                    + "; ".join(f"{d['kind']} ({d['description']})" for d in DETAIL_TYPES)
+                    + " Details are real geometry/modifiers, not descriptions — "
+                    "they run in Blender 4.2.0. Use after the base build, before "
+                    "the final render; combine several calls for a manufactured "
+                    "look (bevel + panel lines + screws + label)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "detail": {"type": "string", "description": "Detail kind: bevel, subdivision, panel_line, screw, bolt, seam, grille, label"},
+                        "target": {"type": "string", "description": "Object name (substring match) to apply the detail to"},
+                        "params": {"type": "object", "description": "Detail parameters (see the tool description for each kind)"},
+                        "blend_path": {"type": "string", "description": "Optional .blend file to open first; without it the detail is applied to an empty scene and fails"},
+                    },
+                    "required": ["detail", "target"],
+                },
+            ),
+            Tool(
+                name="critique_model",
+                description=(
+                    "VISION CRITIQUE LOOP: render 5 views of a saved .blend "
+                    "(front 3/4, side, back, top, close-up), run programmatic "
+                    "checks (PNG exists and decodes, every spec part present, "
+                    "min z >= 0, parts connected/grounded, dimensions vs spec), "
+                    "and return the views plus a structured critique prompt. "
+                    "HONEST LIMIT: this MCP cannot see images — YOU, the calling "
+                    "model, are the critic: look at the rendered PNGs and fill in "
+                    "the per-spec-item pass/fail, problem->fix pairs (concrete "
+                    "operations on named parts), 8-dimension scores and the dual "
+                    "Yes/No gate from the prompt template. Then apply fixes as "
+                    "LOCALISED EDITS (add_detail / execute_blender_code on the same "
+                    "build, never a rebuild), re-render, and verify per fix "
+                    "(applied / not applied / regressed). Max 3 auto-refine rounds; "
+                    "keep the best render + code and REVERT if a round makes things "
+                    "worse. refine_round tracks the round (1-3)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "blend_path": {"type": "string", "description": "Path to the .blend file to critique"},
+                        "spec": {"type": "object", "description": "Optional scene spec {objects: [{name, size_m, material}]} — the contract the critique checks against"},
+                        "output_path": {"type": "string", "description": "Render output prefix; defaults to <blend>_critique"},
+                        "refine_round": {"type": "number", "description": "Auto-refine round number, 1-3 (default 1)"},
+                        "engine": {"type": "string", "description": "Render engine for the critique views: EEVEE (default, fast) or CYCLES"},
+                    },
+                    "required": ["blend_path"],
                 },
             ),
             Tool(
@@ -611,6 +824,21 @@ class BlenderMCPServer:
         elif name == "render_model":
             return await self._render_model(arguments)
 
+        elif name == "generate_3d":
+            return await self._generate_3d(arguments)
+
+        elif name == "retrieve_asset":
+            return await self._retrieve_asset(arguments)
+
+        elif name == "build_product":
+            return await self._build_product(arguments)
+
+        elif name == "add_detail":
+            return await self._add_detail(arguments)
+
+        elif name == "critique_model":
+            return await self._critique_model(arguments)
+
         elif name == "search_models":
             return self.search_service.search_models(arguments.get("query", ""))
 
@@ -654,11 +882,58 @@ class BlenderMCPServer:
             {"name": r.get("name"), "source": r.get("source"), "url": r.get("url")}
             for r in texture_results[:5]
         ]
+        # Prefer a real asset over primitives: a fitting Poly Haven /
+        # Sketchfab / Poly Pizza asset is the recommended path.
+        all_results = model_results.get("all_results", [])
+        asset_candidate = next(
+            (r for r in all_results if r.get("source") in ("poly_pizza", "sketchfab")),
+            None,
+        ) or next((r for r in texture_references if r.get("source") == "poly_haven"), None)
+        if asset_candidate:
+            recommended_path = {
+                "kind": "import_asset",
+                "reason": "A real asset beats modelling from primitives — import this first with import_from_url and check it against the spec before building anything by hand.",
+                "name": asset_candidate.get("name"),
+                "source": asset_candidate.get("source"),
+                "url": asset_candidate.get("url"),
+            }
+        else:
+            recommended_path = {
+                "kind": "model_from_primitives",
+                "reason": "No fitting real asset was found in the search results, so build from a spec (research_model -> build_from_spec / execute_blender_code).",
+            }
+
+        # Reference image: route A (image-to-3D) needs a generation key,
+        # route B (reference-as-spec) works without one.
+        reference_image = args.get("reference_image", "") or ""
+        reference = None
+        if reference_image:
+            is_url = reference_image.startswith("http://") or reference_image.startswith("https://")
+            exists = None if is_url else Path(reference_image).exists()
+            generation_available = bool(os.environ.get("MESHY_API_KEY") or os.environ.get("TRIPO_API_KEY"))
+            reference = {
+                "input": reference_image,
+                "kind": "url" if is_url else "local_path",
+                "exists": exists,
+                "route": (
+                    "A (image-to-3D): a generation key is configured — call generate_3d with image_url / image_base64 to import a neural mesh, then critique it."
+                    if generation_available
+                    else "B (reference-as-spec): no generation key is configured — extract the spec below FROM THE IMAGE (the calling model looks at it) and build procedurally; do not call generate_3d, it will report no key."
+                ),
+                "reference_spec_brief": {
+                    "description": "Look at the reference image and record: parts list with semantic names and parent/child relations; proportions as RATIOS (e.g. canopy width ~ 0.6x body width) and bounding-box fractions, not absolute guesses; palette as 3-5 dominant hex colours with which part each belongs to; per-part material feel (matte / glossy / metallic / transparent + roughness); and what the reference does NOT show (back, underside) flagged as 'to be invented plausibly', so the critic does not penalise the builder for it. This spec becomes the builder brief AND the critic checklist (critique_model).",
+                    "fields": ["parts", "proportions_ratios", "palette_hex", "materials", "unseen_sides"],
+                },
+            }
+            if not is_url and not exists:
+                reference["warning"] = f"Local file not found: {reference_image}. Check the path and call again."
         return {
             "success": True,
             "query": query,
             "references": references,
             "texture_references": texture_references,
+            "recommended_path": recommended_path,
+            **({"reference_image": reference} if reference else {}),
             "part_breakdown_schema": {
                 "description": "Break the subject into named parts with REAL dimensions (metres) before building. One entry per part.",
                 "objects": [
@@ -716,6 +991,63 @@ class BlenderMCPServer:
             "error": result.get("error", ""),
         }
 
+    def _download_polyhaven_hdri(self, slug):
+        """Download a Poly Haven studio HDRI (CC0 — licence verified at
+        polyhaven.com/license on 2026-11-07). Returns (path, reason):
+        path is None on failure (caller falls back to world+sun)."""
+        hdri_dir = self.config.paths.texture_dir / "hdri"
+        hdri_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            req = urllib.request.Request(
+                f"{POLYHAVEN_API}/files/{urllib.parse.quote(slug)}",
+                headers={"User-Agent": POLYHAVEN_USER_AGENT},
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                files = json.loads(response.read().decode())
+        except urllib.error.HTTPError as e:
+            return None, f"Poly Haven: no HDRI named '{slug}' (HTTP {e.code})."
+        except Exception as e:
+            return None, f"Poly Haven API unreachable: {e}."
+        # /files/<slug> nests resolutions under a key like "hdri": pick a 1k
+        # .hdr first, then 2k .hdr, then any .exr. Defensive walk: any
+        # nested {url} ending in .hdr/.exr qualifies.
+        candidates = []
+
+        def walk(node, depth, res_key):
+            if not isinstance(node, dict) or depth > 4:
+                return
+            for key, value in node.items():
+                if isinstance(value, dict) and isinstance(value.get("url"), str):
+                    url = value["url"]
+                    low = url.lower()
+                    if ".hdr" in low or ".exr" in low:
+                        # Prefer 1k, then 2k, then larger; .hdr over .exr.
+                        res_score = {"1k": 0, "2k": 1, "4k": 2, "8k": 3}.get(res_key, 4)
+                        score = res_score + (0 if ".hdr" in low else 10)
+                        candidates.append((score, url))
+                else:
+                    walk(value, depth + 1, key if re.match(r"^\d+k$", key) else res_key)
+
+        walk(files, 0, "")
+        if not candidates:
+            return None, f"Poly Haven: no .hdr/.exr file found for HDRI '{slug}'."
+        candidates.sort(key=lambda c: c[0])
+        url = candidates[0][1]
+        ext = "hdr" if ".hdr" in url.lower() else "exr"
+        local_path = hdri_dir / f"{slug}.{ext}"
+        if local_path.exists():
+            return str(local_path), None
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": POLYHAVEN_USER_AGENT})
+            with urllib.request.urlopen(req, timeout=120) as response:
+                data = response.read()
+            if len(data) > 100 * 1024 * 1024:
+                return None, "Poly Haven HDRI exceeds the 100 MB download cap."
+            local_path.write_bytes(data)
+            return str(local_path), None
+        except Exception as e:
+            return None, f"Poly Haven HDRI download failed: {e}."
+
     async def _render_model(self, args: dict) -> dict:
         """Render a saved .blend with the presentation preset (verified PNGs)."""
         blend_path = args.get("blend_path", "")
@@ -723,7 +1055,232 @@ class BlenderMCPServer:
         views = args.get("views") or ["front", "side", "perspective"]
         if not blend_path or not output_path:
             return {"success": False, "error": "blend_path and output_path are required."}
-        return self.model_builder.render_model(blend_path, output_path, list(views))
+        options = {}
+        if isinstance(args.get("engine"), str):
+            options["engine"] = args["engine"]
+        if isinstance(args.get("samples"), (int, float)):
+            options["samples"] = args["samples"]
+        if isinstance(args.get("view_transform"), str):
+            options["view_transform"] = args["view_transform"]
+        if isinstance(args.get("lens"), (int, float)):
+            options["lens"] = args["lens"]
+        if isinstance(args.get("fill_fraction"), (int, float)):
+            options["fill_fraction"] = args["fill_fraction"]
+        if isinstance(args.get("transparent"), bool):
+            options["transparent"] = args["transparent"]
+        if isinstance(args.get("turntable_frames"), (int, float)):
+            options["turntable_frames"] = args["turntable_frames"]
+        if isinstance(args.get("resolution"), list) and len(args["resolution"]) == 2:
+            options["resolution"] = [int(args["resolution"][0]), int(args["resolution"][1])]
+        hdri_fallback = None
+        hdri = args.get("hdri", "") or ""
+        if hdri.startswith("polyhaven:"):
+            slug = hdri[len("polyhaven:"):].strip()
+            if not slug:
+                return {"success": False, "error": "HDRI needs a slug: polyhaven:<slug>."}
+            path, reason = self._download_polyhaven_hdri(slug)
+            if path:
+                options["hdri_path"] = path
+            else:
+                hdri_fallback = reason
+        elif hdri:
+            if not Path(hdri).exists():
+                return {"success": False, "error": f"HDRI file not found: {hdri}"}
+            options["hdri_path"] = hdri
+        result = self.model_builder.render_model(blend_path, output_path, list(views), options)
+        result["engine"] = options.get("engine", "EEVEE")
+        if hdri_fallback:
+            result["hdri_fallback"] = hdri_fallback
+        return result
+
+    async def _generate_3d(self, args: dict) -> dict:
+        """AI generation via Meshy / Tripo, then import + normalise."""
+        provider = args.get("provider", "meshy") or "meshy"
+        if provider not in ("meshy", "tripo"):
+            return {"success": False, "error": f"Unknown provider '{provider}'. Available: meshy, tripo. (Hunyuan3D / Rodin are not implemented — see README.)"}
+        mode = "image" if (args.get("image_url") or args.get("image_base64")) else "text"
+        if mode == "text" and not (args.get("prompt") or "").strip():
+            return {"success": False, "error": "generate_3d text mode needs a prompt; image mode needs image_url or image_base64."}
+        opts = {
+            "provider": provider,
+            "mode": mode,
+            "prompt": args.get("prompt") or None,
+            "image_url": args.get("image_url") or None,
+            "image_base64": args.get("image_base64") or None,
+            "texture": args.get("texture", True) if isinstance(args.get("texture"), bool) else True,
+            "target_size": args.get("target_size", 1.0) if isinstance(args.get("target_size"), (int, float)) else 1.0,
+            "target_polycount": args.get("target_polycount") if isinstance(args.get("target_polycount"), (int, float)) else None,
+            "timeout_seconds": args.get("timeout_seconds", 600) if isinstance(args.get("timeout_seconds"), (int, float)) else 600,
+        }
+        glb_name = f"generated_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        result = run_generate_3d(opts, self.config.paths.temp_dir, glb_name)
+        if not result.get("success") or not result.get("glb_path"):
+            return result  # no-key honest error, or a provider failure — nothing to import
+        # Import the downloaded GLB via the existing import path and
+        # normalise: longest side -> target_size, origin at bottom, min z = 0.
+        name = re.sub(r"[^A-Za-z0-9_-]", "_", glb_name)
+        output_path = self.config.paths.output_dir / f"{name}.blend"
+        import_ops = {
+            "glb": "bpy.ops.import_scene.gltf",
+            "gltf": "bpy.ops.import_scene.gltf",
+            "obj": "bpy.ops.import_scene.obj",
+            "fbx": "bpy.ops.import_scene.fbx",
+            "stl": "bpy.ops.import_mesh.stl",
+        }
+        script = self._build_import_script(result["glb_path"], import_ops["glb"], str(output_path), opts["target_size"])
+        imported = self.model_builder.create_mesh(script)
+        result["output"] = imported.get("output", str(output_path))
+        result["import_success"] = imported.get("success", False)
+        result["import_error"] = imported.get("error", "")
+        result["note"] = "Orientation/scale were verified in Blender on import (longest side = target_size, min z = 0). No provider states a GLB up-axis, so check the render before trusting the orientation."
+        return result
+
+    async def _retrieve_asset(self, args: dict) -> dict:
+        """Free real-asset retrieval (Poly Haven CC0, no key)."""
+        cache_dir = self.config.paths.texture_dir / "retrieved_assets"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        opts = {
+            "product": args.get("product") or None,
+            "query": args.get("query") or None,
+            "source": args.get("source", "polyhaven") or "polyhaven",
+            "resolution": args.get("resolution", "1k") or "1k",
+        }
+        return retrieve_asset(opts, cache_dir)
+
+    async def _build_product(self, args: dict) -> dict:
+        """Build a catalogue product — retrieved real asset first, else
+        the proper procedural builder (real curves, no stacked boxes)."""
+        product = (args.get("product") or "").lower().strip()
+        if product not in PRODUCTS:
+            return {"success": False,
+                    "error": f"Unknown product {product!r}. Known products: {', '.join(sorted(PRODUCTS))}."}
+        source = (args.get("source") or "auto").lower().strip()
+        if source not in ("auto", "procedural", "retrieved"):
+            return {"success": False, "error": f"Unknown source '{source}'. Use auto, procedural or retrieved."}
+        target_size = args.get("target_size", 0.22) if isinstance(args.get("target_size"), (int, float)) else 0.22
+        info = PRODUCTS[product]
+
+        # Retrieved path: products with a verified-good free asset.
+        if source in ("auto", "retrieved") and info.get("source") == "retrieved-preferred":
+            retrieved = await self._retrieve_asset({"product": product})
+            if retrieved.get("success") and retrieved.get("asset", {}).get("gltf_path"):
+                asset = retrieved["asset"]
+                script = get_retrieved_product_script(asset["gltf_path"], target_size)
+                result = self.model_builder.create_mesh_with_report(script)
+                result["product"] = product
+                result["source"] = "retrieved"
+                result["asset"] = asset
+                return result
+            if source == "retrieved":
+                return {"success": False, "product": product, "source": "retrieved",
+                        "error": retrieved.get("error", "Retrieved asset unavailable."),
+                        "note": "Call build_product with source 'procedural' for the fallback builder."}
+            note = (f"Retrieved asset unavailable ({retrieved.get('error', 'unknown')}); "
+                    "fell back to the procedural builder.")
+        else:
+            note = None
+
+        script, error = get_product_script(product)
+        if script is None:
+            return {"success": False, "product": product, "error": error}
+        result = self.model_builder.create_mesh_with_report(script)
+        result["product"] = product
+        result["source"] = "procedural"
+        if note:
+            result["note"] = note
+        return result
+
+    async def _add_detail(self, args: dict) -> dict:
+        """Apply one manufactured detail to a target object."""
+        detail = args.get("detail", "") or ""
+        target = args.get("target", "") or ""
+        params = args.get("params") or {}
+        blend_path = args.get("blend_path", "") or ""
+        if not detail or not target:
+            return {"success": False, "error": "add_detail needs detail and target."}
+        try:
+            script = get_detail_script(detail, target, params)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        if blend_path and not Path(blend_path).exists():
+            return {"success": False, "error": f"Blend file not found: {blend_path}"}
+        open_line = f"import bpy\nbpy.ops.wm.open_mainfile(filepath={json.dumps(blend_path)})\n" if blend_path else ""
+        result = self.model_builder.create_mesh(open_line + script)
+        result["detail"] = detail
+        result["target"] = target
+        result["params"] = params
+        return result
+
+    async def _critique_model(self, args: dict) -> dict:
+        """Render 5 views + programmatic checks + structured critique prompt."""
+        blend_path = args.get("blend_path", "") or ""
+        if not blend_path:
+            return {"success": False, "error": "blend_path is required."}
+        if not Path(blend_path).exists():
+            return {"success": False, "error": f"Blend file not found: {blend_path}"}
+        refine_round = max(1, min(MAX_REFINE_ROUNDS, int(args.get("refine_round") or 1)))
+        spec = args.get("spec") or {"objects": []}
+        output_prefix = re.sub(
+            r"\.(png|blend)$",
+            "",
+            args.get("output_path") or re.sub(r"\.blend$", "", blend_path, flags=re.IGNORECASE) + "_critique",
+            flags=re.IGNORECASE,
+        )
+        engine = "CYCLES" if args.get("engine") == "CYCLES" else "EEVEE"
+
+        # 1. Render the 5 critique views (front 3/4, side, back, top, close-up).
+        views = ["perspective", "side", "back", "top", "front"]
+        rendered = self.model_builder.render_model(blend_path, output_prefix, views, {"engine": engine})
+        if not rendered.get("success"):
+            return {"success": False, "error": f"Critique render failed: {rendered.get('error')}", "stdout": rendered.get("stdout", "")}
+
+        # 2. Programmatic checks inside Blender (bounds, presence, dimensions, connectivity).
+        checks = []
+        check_error = ""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(build_critique_script(json.dumps(spec)))
+            script_path = f.name
+        try:
+            result = self.model_builder.run_blender_args(
+                ["--background", blend_path, "--python", script_path],
+                timeout=max(self.config.blender.timeout, 120),
+            )
+            if not result.get("success"):
+                check_error = result.get("error") or "critique checks failed to run"
+            else:
+                parsed = parse_critique_json(result.get("stdout", ""))
+                checks = (parsed or {}).get("checks", [])
+                if not checks:
+                    check_error = "Blender ran but reported no critique checks."
+        finally:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
+
+        # 3. PNG decode checks (host-side): a PNG that exists but does not
+        #    decode is a failure, not a render.
+        for r in rendered.get("renders", []):
+            decodes = png_decodes(r["path"])
+            checks.append({
+                "check": f"png_decodes:{r['view']}",
+                "passed": decodes,
+                "detail": f"{r['size_bytes']} bytes, valid PNG" if decodes else "PNG exists but does not decode",
+            })
+        if check_error:
+            checks.append({"check": "programmatic_checks_ran", "passed": False, "detail": check_error})
+
+        passed = all(c.get("passed") for c in checks)
+        return {
+            "success": True,
+            "checks": checks,
+            "passed": passed,
+            "renders": rendered.get("renders", []),
+            "critique_prompt": build_critique_prompt(spec, checks),
+            "refine_round": refine_round,
+            "max_rounds": MAX_REFINE_ROUNDS,
+            "note": CRITIQUE_NOTE,
+        }
 
     async def _create_model(self, args: dict) -> dict:
         """Create complex 3D model."""

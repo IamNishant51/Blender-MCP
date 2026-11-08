@@ -308,6 +308,13 @@ def _bounds_of(objs):
             // Base torus: outer diameter 1.0, tube height 0.25.
             lines.push(`bpy.ops.mesh.primitive_torus_add(location=_centre, major_radius=0.375, minor_radius=0.125)\n_obj = bpy.context.active_object\n_obj.scale = (${size[0]}, ${size[1]}, ${size[2] / 0.25})`);
         }
+        // Curved primitives are flat-shaded by default, which reads as faceted
+        // "disco ball" segments under studio light (v1.3.0 demo sneaker
+        // toe/heel). Smooth-shade them so they read as moulded parts. Cubes
+        // stay flat-shaded for crisp edges.
+        if (kind !== 'cube') {
+            lines.push(`for _p in _obj.data.polygons: _p.use_smooth = True`);
+        }
         if (rot.some((r) => r !== 0)) {
             lines.push(`_obj.rotation_euler = (math.radians(${rot[0]}), math.radians(${rot[1]}), math.radians(${rot[2]}))`);
         }

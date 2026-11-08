@@ -8,6 +8,14 @@ procedural materials:
 - marble:    Voronoi -> ColorRamp thin veins + Subsurface 0.1 + Roughness 0.2
 - metal:     Metallic 1.0, Noise into Roughness 0.2-0.4, Bump
 - fabric:    Sheen 1.0, Roughness 0.9, Noise -> Bump
+- smooth_leather: plain Principled, Roughness 0.7, Sheen 0.3 — NO noise
+  nodes at all (v1.3.0 fix: the fabric Noise->Bump at scale 25 on a small
+  strap reads as a scribbled artifact under studio light; straps and
+  cushions must use smooth_leather, never fabric)
+- matte_plastic: plain Principled, Roughness 0.55 — no noise
+- rubber:     plain Principled, near-black, Roughness 0.95 — no noise
+- white_leather: plain Principled, off-white, Roughness 0.5, Sheen 0.5
+- amber_liquid: Transmission 0.85, amber Base Color, Roughness 0.05
 - steel:     Metallic 0.9, Roughness 0.35
 - glass:     Transmission 1, IOR 1.45, Roughness 0.05
 - skin:      Subsurface 0.4, warm brown
@@ -24,7 +32,7 @@ written as custom properties on the material).
 import json
 
 POLYHAVEN_API = "https://api.polyhaven.com"
-USER_AGENT = "blender-mcp/1.2.0 (https://github.com/IamNishant51/Blender-MCP)"
+USER_AGENT = "blender-mcp/1.3.0 (https://github.com/IamNishant51/Blender-MCP)"
 POLYHAVEN_LICENCE = "CC0"
 
 
@@ -134,7 +142,9 @@ links.new(voronoi.outputs["Distance"], ramp.inputs["Fac"])
 links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
 bsdf.inputs["Roughness"].default_value = 0.2
 bsdf.inputs["Subsurface Weight"].default_value = 0.1
-bsdf.inputs["Subsurface Color"].default_value = {tuple(base)}
+# NOTE: Blender 4.2's Principled BSDF has no "Subsurface Color" input —
+# subsurface takes its colour from Base Color (the Voronoi ramp above).
+# Setting it raises KeyError and kills the whole build.
 """
     )
 
@@ -196,7 +206,8 @@ def _skin_script(name: str) -> str:
 bsdf.inputs["Base Color"].default_value = (0.55, 0.35, 0.25, 1)
 bsdf.inputs["Roughness"].default_value = 0.6
 bsdf.inputs["Subsurface Weight"].default_value = 0.4
-bsdf.inputs["Subsurface Color"].default_value = (0.45, 0.2, 0.12, 1)
+# NOTE: Blender 4.2's Principled BSDF has no "Subsurface Color" input —
+# subsurface takes its colour from Base Color. Setting it raises KeyError.
 bsdf.inputs["Subsurface Radius"].default_value = (1.0, 0.2, 0.1)
 '''
     )
@@ -211,6 +222,113 @@ def _sandstone_script(name: str, dark=(0.75, 0.6, 0.35, 1), light=(0.9, 0.78, 0.
         + '''
 links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
 bsdf.inputs["Roughness"].default_value = 0.9
+'''
+    )
+
+
+def _smooth_leather_script(name: str, base=(0.16, 0.12, 0.10, 1)) -> str:
+    """Smooth leather for straps / cushions — deliberately NO noise nodes.
+
+    v1.3.0 fix: the v1.3.0 smartwatch strap used ``fabric`` (Noise -> Bump
+    at scale 25, Generated coordinates). On a 22 mm strap that noise reads
+    as a scribbled artifact under studio light. A real strap is smooth at
+    this scale: plain Principled + a little sheen, nothing else.
+    """
+    return (
+        _node_header(name)
+        + f'''
+bsdf.inputs["Base Color"].default_value = {tuple(base)}
+bsdf.inputs["Roughness"].default_value = 0.7
+bsdf.inputs["Sheen Weight"].default_value = 0.3
+bsdf.inputs["Sheen Roughness"].default_value = 0.6
+'''
+    )
+
+
+def _matte_plastic_script(name: str, base=(0.05, 0.05, 0.05, 1)) -> str:
+    """Matte plastic — plain Principled, no noise (headphone cups/bands)."""
+    return (
+        _node_header(name)
+        + f'''
+bsdf.inputs["Base Color"].default_value = {tuple(base)}
+bsdf.inputs["Roughness"].default_value = 0.55
+bsdf.inputs["Metallic"].default_value = 0.0
+'''
+    )
+
+
+def _rubber_script(name: str) -> str:
+    """Rubber (soles, cushions) — near-black, very rough, no noise."""
+    return (
+        _node_header(name)
+        + '''
+bsdf.inputs["Base Color"].default_value = (0.03, 0.03, 0.03, 1)
+bsdf.inputs["Roughness"].default_value = 0.95
+bsdf.inputs["Metallic"].default_value = 0.0
+'''
+    )
+
+
+def _white_leather_script(name: str) -> str:
+    """Off-white sneaker leather — plain Principled, slight sheen, no noise."""
+    return (
+        _node_header(name)
+        + '''
+bsdf.inputs["Base Color"].default_value = (0.93, 0.92, 0.90, 1)
+bsdf.inputs["Roughness"].default_value = 0.5
+bsdf.inputs["Sheen Weight"].default_value = 0.5
+bsdf.inputs["Sheen Roughness"].default_value = 0.5
+'''
+    )
+
+
+def _amber_liquid_script(name: str) -> str:
+    """Amber perfume liquid — mostly transmissive, warm amber colour."""
+    return (
+        _node_header(name)
+        + '''
+bsdf.inputs["Base Color"].default_value = (0.85, 0.45, 0.12, 1)
+bsdf.inputs["Roughness"].default_value = 0.05
+bsdf.inputs["Transmission Weight"].default_value = 0.85
+bsdf.inputs["IOR"].default_value = 1.33
+'''
+    )
+
+
+def _polished_steel_script(name: str) -> str:
+    """Polished steel for small metal parts (yokes, rings, crowns) — NO
+    noise nodes. The ``metal``/``steel`` builders put Noise into roughness
+    + bump, which reads as a streaky/scratchy strip on a 5 mm yoke."""
+    return (
+        _node_header(name)
+        + '''
+bsdf.inputs["Base Color"].default_value = (0.85, 0.85, 0.86, 1)
+bsdf.inputs["Roughness"].default_value = 0.25
+bsdf.inputs["Metallic"].default_value = 0.9
+'''
+    )
+
+
+def _white_script(name: str) -> str:
+    """Plain white (labels, watch markers/hands) — no noise."""
+    return (
+        _node_header(name)
+        + '''
+bsdf.inputs["Base Color"].default_value = (0.95, 0.95, 0.95, 1)
+bsdf.inputs["Roughness"].default_value = 0.4
+bsdf.inputs["Metallic"].default_value = 0.0
+'''
+    )
+
+
+def _accent_red_script(name: str) -> str:
+    """Sneaker accent red — plain Principled, no noise."""
+    return (
+        _node_header(name)
+        + '''
+bsdf.inputs["Base Color"].default_value = (0.65, 0.08, 0.08, 1)
+bsdf.inputs["Roughness"].default_value = 0.5
+bsdf.inputs["Metallic"].default_value = 0.0
 '''
     )
 
@@ -237,6 +355,16 @@ _NODE_BUILDERS = {
     "steel": lambda n: _metal_script(n, tint=(0.85, 0.85, 0.86, 1), metallic=0.9,
                                      rough_lo=0.3, rough_hi=0.4),
     "fabric": _fabric_script,
+    "smooth_leather": _smooth_leather_script,
+    "brown_leather": lambda n: _smooth_leather_script(n, base=(0.32, 0.20, 0.12, 1)),
+    "black_leather": lambda n: _smooth_leather_script(n, base=(0.05, 0.05, 0.05, 1)),
+    "matte_plastic": _matte_plastic_script,
+    "rubber": _rubber_script,
+    "white_leather": _white_leather_script,
+    "amber_liquid": _amber_liquid_script,
+    "polished_steel": _polished_steel_script,
+    "white": _white_script,
+    "accent_red": _accent_red_script,
     "glass": _glass_script,
     "skin": _skin_script,
     "sandstone": _sandstone_script,
@@ -263,6 +391,16 @@ class MaterialLibrary:
         "sandstone": {"base_color": (0.85, 0.75, 0.6, 1), "roughness": 0.9, "metallic": 0.0},
         "terracotta": {"base_color": (0.8, 0.45, 0.3, 1), "roughness": 0.85, "metallic": 0.0},
         "black": {"base_color": (0.02, 0.02, 0.02, 1), "roughness": 0.15, "metallic": 0.0},
+        "smooth_leather": {"base_color": (0.16, 0.12, 0.10, 1), "roughness": 0.7, "metallic": 0.0},
+        "brown_leather": {"base_color": (0.32, 0.20, 0.12, 1), "roughness": 0.7, "metallic": 0.0},
+        "black_leather": {"base_color": (0.05, 0.05, 0.05, 1), "roughness": 0.7, "metallic": 0.0},
+        "matte_plastic": {"base_color": (0.05, 0.05, 0.05, 1), "roughness": 0.55, "metallic": 0.0},
+        "rubber": {"base_color": (0.03, 0.03, 0.03, 1), "roughness": 0.95, "metallic": 0.0},
+        "white_leather": {"base_color": (0.93, 0.92, 0.90, 1), "roughness": 0.5, "metallic": 0.0},
+        "amber_liquid": {"base_color": (0.85, 0.45, 0.12, 1), "roughness": 0.05, "metallic": 0.0},
+        "polished_steel": {"base_color": (0.85, 0.85, 0.86, 1), "roughness": 0.25, "metallic": 0.9},
+        "white": {"base_color": (0.95, 0.95, 0.95, 1), "roughness": 0.4, "metallic": 0.0},
+        "accent_red": {"base_color": (0.65, 0.08, 0.08, 1), "roughness": 0.5, "metallic": 0.0},
     }
 
     # Backwards-compatible alias: the old flat table.

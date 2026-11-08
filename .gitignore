@@ -3,3 +3,8 @@ dist/
 __pycache__/
 *.egg-info/
 *.pyc
+# Retrieved 3D assets (Poly Haven glTF/.blend + textures) are downloaded on
+# demand into assets/ and the texture cache — binary files, never committed.
+assets/
+output/
+.temp/

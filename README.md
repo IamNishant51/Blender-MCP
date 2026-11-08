@@ -31,6 +31,118 @@ Blender MCP enables AI assistants to control Blender programmatically, allowing 
 
 ---
 
+## What's new in 1.3.0
+
+- **New tool `generate_3d` — AI generation (Meshy first, Tripo second):**
+  text-to-3D and image-to-3D. Meshy text-to-3D is two billed steps
+  (`preview` 20 credits → `refine` 10 credits = 30 for a textured model;
+  `texture:false` stops after the mesh-only preview); image-to-3D is 30
+  credits and takes a URL or a base64 data URI (≤ 20 MB). Tripo is
+  $0.20 (text) / $0.30 (image) for a textured model. Keys come from
+  environment variables only — `MESHY_API_KEY` / `TRIPO_API_KEY` — never
+  baked into source. The GLB is downloaded immediately (Meshy keeps
+  assets 3 days; Tripo's model URL expires in 5 minutes, so it is
+  downloaded inside the poll loop), then imported through the existing
+  import path and normalised (longest side = `target_size`, origin at
+  bottom, min z = 0). Polling reports progress and a timeout never cancels
+  the provider task — keep the task id and poll again. **No key = the
+  tool says so honestly and points at the free local path** (`research_model`
+  → `build_from_spec` / `execute_blender_code`); it never fails silently
+  and never invents a model. Hunyuan3D and Hyper3D Rodin are not
+  implemented yet (Hunyuan needs TC3-HMAC-SHA256 signing + a Tencent Cloud
+  account; Rodin needs the $120/mo Business plan for full API access).
+- **Reference-image input:** `research_model` accepts `reference_image`
+  (local path or URL). With a generation key it drives image-to-3D; without
+  one it becomes the visual reference the spec is built from (parts,
+  proportions as ratios, palette, materials, unseen sides flagged
+  "to be invented plausibly").
+- **Cycles studio pipeline in `render_model`:** new `engine` option —
+  Cycles (CPU) alongside the existing EEVEE path. Studio HDRI/world
+  lighting: `hdri: "polyhaven:<slug>"` auto-downloads a Poly Haven CC0
+  HDRI (1k by default; falls back to the world+sun setup if the download
+  fails), plus a 3-point + rim light rig derived from the product bounding
+  box. Denoising is on (OpenImageDenoise, RGB_ALBEDO_NORMAL passes).
+  Colour: Khronos PBR Neutral for catalogue shots, AgX for hero shots
+  (Filmic is deprecated). Camera: 50 mm default, 85 mm hero,
+  90–105 mm macro for small products. New `turntable_frames` renders
+  exactly 360° about Z, and `transparent: true` gives transparent-
+  background product shots (Cycles Shadow Catcher + Film Transparent —
+  EEVEE has no shadow catcher, so EEVEE + transparent hides the ground
+  and gives no contact shadow). Cycles timeout floor is 1800 s
+  (EEVEE 600 s); samples are kept modest (128–256 + OIDN) because this
+  VM has no GPU and Cycles runs on CPU.
+- **New tool `add_detail` — detail helpers library:** bevels,
+  subdivision surfaces, panel lines, screws, bolts, seams, grilles/vents
+  and text labels, applied to a named object of a saved `.blend` with
+  parameters (e.g. `bevel` width/segments, `grille` rows, `label` text).
+  Every helper runs in real Blender 4.2.0 (smoke-tested).
+- **New tool `critique_model` — vision critique loop:** renders 5 views
+  (front ¾, side, back, top, close-up), runs programmatic checks (PNG
+  exists and decodes, every spec part present, min z ≥ 0, parts
+  connected/grounded, dimensions vs spec within 10%), and returns the
+  views plus a structured critique prompt (per-spec-item pass/fail,
+  problem→fix pairs as concrete operations on named parts, 8-dimension
+  scores, dual Yes/No gate). **Honest limit: this MCP cannot see images
+  — the calling model is the critic; the MCP renders, returns the image,
+  and runs the fix iteration.** Max 3 auto-refine rounds, keep-best +
+  revert.
+- **Prefer a real asset over primitives:** `research_model` now returns
+  `recommended_path` — if a Poly Haven / Sketchfab / Poly Pizza asset fits
+  the request it is named as the recommended path (import via
+  `import_from_url`) before modelling from primitives.
+- **Fixes:** `add_detail` used to emit `bpy.ops.wm.open_mainfile(...)`
+  before any `import bpy`, so every detail call died with a `NameError`
+  in real Blender. Fixed — and the run was only caught because Blender
+  exits 0 even when the `--python` script raises, so `runBlender` now
+  treats a Python traceback on stderr as a failure instead of
+  `success:true` with nothing saved (the same false-success class of bug
+  as v1.1.0). The `seam` detail used to draw a circular ring sized by the
+  target's longest dimension, which floated far off any flat or long
+  object (the demo headband got a giant ring); it is now a unit torus
+  scaled into an ellipse that hugs the object's actual cross-section.
+  Turntable frames were rendered to disk but never listed in the
+  `render_model` result (the host rebuilt the list from `views` only);
+  it now parses the script's `RENDER_DONE_JSON`, so the returned list
+  includes every frame. **Headless-Linux note:** EEVEE needs `libEGL.so.1`
+  (package `libegl1`); Cycles CPU rendering does not.
+- **Fix round (2026-11-08, still 1.3.0): the demo renders were rejected
+  outright, so the products were rebuilt properly.** New tool
+  `retrieve_asset` — free real-asset retrieval first: Poly Haven (CC0,
+  no key) is searched and the 1k glTF package downloaded; the smartwatch
+  now uses the real Poly Haven `digital_wrist_watch` (vintage digital
+  watch, CC0). Poly Pizza search needs the user's own `POLY_PIZZA_API_KEY`
+  (its search endpoint returns HTTP 401 without a key since 2026-11-08) —
+  without one the tool says so honestly. New tool `build_product` —
+  proper builders with real curves, not stacked primitives: headphones
+  (arched swept band + inner cushion + padded torus cup cushions),
+  sneaker (lofted sole with footprint taper + toe spring, lofted upper,
+  bezier-curve laces through metal eyelets, toe cap, heel counter),
+  perfume (bevelled glass body, amber liquid, gold neck ring, bevelled
+  cap seated on the neck with no gap, NOIR label), smartwatch
+  (procedural fallback: bevelled case, dial with 12 markers + hands at
+  10:10, crown, curved strap). New materials `smooth_leather`,
+  `matte_plastic`, `rubber`, `white_leather`, `amber_liquid` — all with
+  NO noise nodes: the v1.3.0 watch strap used `fabric` (Noise→Bump),
+  which read as a scribbled artifact on a 22 mm strap. `render_model`
+  now frames EXACTLY: per view the camera pulls back until the subject's
+  binding axis fills `fill_fraction` (default 0.7) of the frame — the old
+  `max_dim * 2.5 + 0.5` heuristic rendered the demo watch at ~30% of the
+  frame. Retrieved assets are downloaded on demand into the asset cache
+  and never committed (binary files cannot go through snapshot-push).
+
+### Honest limits of 1.3.0
+
+- Without a generation API key there are **no AI-generated meshes** —
+  the free local path builds from primitives + details + real textures +
+  studio rendering, which is visibly better than v1.2.0 but still cannot
+  match a human 3D artist's mesh. The realistic leap needs
+  `generate_3d` with a key, or a retrieved real asset.
+- The MCP itself does not see images: `critique_model` renders and
+  checks programmatically, but the visual judgement is the calling
+  model's job.
+- Cycles on CPU is slow (a 128-sample 1280×720 hero frame takes minutes
+  on this VM); EEVEE is the fast path.
+
 ## What's new in 1.2.0
 
 - **Research-first pipeline:** new `research_model` tool — search references
@@ -127,9 +239,14 @@ npx blender-mcp
 | Tool | Description |
 |------|-------------|
 | `create_complex_model` | Build complex 3D models with internet search and detailed planning. Supports Indian themes: temples, vehicles, food, characters, buildings, and more. |
-| `research_model` | Research-first step: search references for a model and get the part-breakdown schema. No code is written before this step — produce a JSON scene spec, then call `build_from_spec`. |
+| `research_model` | Research-first step: search references for a model and get the part-breakdown schema. No code is written before this step — produce a JSON scene spec, then call `build_from_spec`. Accepts `reference_image` (local path or URL): with a generation key it drives image-to-3D, without one it is the visual reference the spec is built from. Returns `recommended_path` when a real Poly Haven / Sketchfab / Poly Pizza asset fits — prefer that over modelling from primitives. |
 | `build_from_spec` | Build a scene from a validated JSON scene spec (metres, Z-up, bottom-centre positions, mate attachments). Returns object names, bounding boxes and min z. |
-| `render_model` | Render a saved `.blend` with the presentation preset (50 mm camera, 3-point lighting, ground plane) as verified EEVEE PNGs, one per view. |
+| `generate_3d` | AI generation (Meshy first, Tripo second): text-to-3D or image-to-3D. Needs `MESHY_API_KEY` or `TRIPO_API_KEY` — without a key it says so honestly and points at the free local path. Downloads the GLB immediately, imports it and normalises (longest side = `target_size`, min z = 0). |
+| `retrieve_asset` | Free real-asset retrieval before building from primitives: searches Poly Haven (CC0, no key) and downloads the 1k glTF package. Known good: smartwatch → Poly Haven `digital_wrist_watch`. Poly Pizza needs the user's own `POLY_PIZZA_API_KEY` (search is HTTP 401 without a key). |
+| `build_product` | Build a catalogue product with real curves: headphones (arched band + padded cups), sneaker (lofted sole + toe spring + bezier laces), perfume (bevelled glass, seated gold cap), smartwatch (real dial + curved strap; `source: auto` prefers the retrieved Poly Haven watch). |
+| `add_detail` | Apply a named detail to an object of a saved `.blend`: `bevel`, `subdivision`, `panel_line`, `screw`, `bolt`, `seam`, `grille`, `label` — with parameters. |
+| `critique_model` | Vision critique loop: renders 5 views, runs programmatic checks (PNG decodes, parts present, min z ≥ 0, connected/grounded, dimensions vs spec), returns the views plus a structured critique prompt for the calling model (the MCP itself cannot see images). Max 3 auto-refine rounds. |
+| `render_model` | Render a saved `.blend` with the studio preset (50 mm camera, 3-point + rim lighting, ground plane) as verified PNGs, one per view. `engine: "CYCLES"` for Cycles CPU + OpenImageDenoise (AgX hero / PBR Neutral catalogue, 85 mm hero lens, `polyhaven:<slug>` studio HDRI, turntable 360° about Z, transparent-background product shots); default is EEVEE. Camera framing is exact: the subject fills `fill_fraction` (default 0.7) of the frame on its binding axis. |
 | `execute_blender_code` | Run arbitrary Blender Python (`bpy`) code. Use for any model that is not one of the five built-in templates. Z-up, dimensions in metres, ground at z = 0. |
 | `modify_model` | Modify existing 3D models - change colors, materials, scale, rotation, or apply effects. |
 | `apply_texture` | Apply procedural materials to 3D objects (wood, marble, stone, metal, etc.) — real Principled BSDF node trees, not flat colours. Use `polyhaven:<slug>` to download and apply a real Poly Haven texture (1k maps, colour-space-correct, packed into the `.blend`). Pass `blend_path` to texture a saved model; without it the material is created but applied to nothing. |
@@ -208,6 +325,9 @@ Built-in procedural materials:
 | `BLENDER_TIMEOUT` | `120` | Timeout for Blender operations (seconds) |
 | `BLENDER_MCP_DIR` | `~/Desktop/BLENDER-MCP` | Base directory for output files |
 | `BLENDER_MCP_DEBUG` | `false` | Enable debug logging |
+| `MESHY_API_KEY` | — | Meshy API key for `generate_3d` (text/image-to-3D). No key = the tool says so and points at the free local path. Never put a key in source. |
+| `TRIPO_API_KEY` | — | Tripo API key for `generate_3d` (second provider after Meshy). Same no-key behaviour. |
+| `POLY_PIZZA_API_KEY` | — | Poly Pizza API key for `retrieve_asset` (source `poly_pizza`). Poly Pizza search returns HTTP 401 without a key; without one the tool says so honestly and searches Poly Haven instead. Never put a key in source. |
 
 ---
 

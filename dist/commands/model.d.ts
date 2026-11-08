@@ -49,7 +49,7 @@ export declare class ModelBuilder {
      * `outputPrefix` is a file path prefix; each view renders to
      * `<prefix>_<view>.png` (a trailing .png/.blend extension is stripped).
      */
-    renderModel(blendPath: string, outputPrefix: string, views: string[]): Promise<ModelResult>;
+    renderModel(blendPath: string, outputPrefix: string, views: string[], options?: import('./render.js').RenderOptions): Promise<ModelResult>;
     /** Run Blender with an arbitrary argument list (e.g. --background <blend> --python ...).
      * `timeoutSeconds` overrides the configured timeout; renders pass a
      * higher floor because EEVEE on software GL is slow (~1 min/view). */
@@ -90,7 +90,7 @@ export declare function getMaterialScript(materialType: string): string;
  */
 export declare function getSmartUVScript(): string;
 export declare const POLYHAVEN_API = "https://api.polyhaven.com";
-export declare const POLYHAVEN_USER_AGENT = "blender-mcp/1.2.0 (https://github.com/IamNishant51/Blender-MCP)";
+export declare const POLYHAVEN_USER_AGENT = "blender-mcp/1.3.0 (https://github.com/IamNishant51/Blender-MCP)";
 export declare const POLYHAVEN_LICENCE = "CC0";
 export interface PolyHavenMaps {
     color?: string;

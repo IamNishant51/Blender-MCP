@@ -1,6 +1,6 @@
 """Blender MCP - Connect AI assistants to Blender for 3D creation."""
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __author__ = "Blender MCP Team"
 __description__ = "MCP server for controlling Blender via AI assistants"
 

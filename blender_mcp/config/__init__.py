@@ -44,7 +44,7 @@ class SearchConfig:
 class ServerConfig:
     """Main server configuration."""
     name: str = "blender-copilot"
-    version: str = "1.2.0"
+    version: str = "1.3.0"
     blender: BlenderConfig = field(default_factory=BlenderConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     search: SearchConfig = field(default_factory=SearchConfig)

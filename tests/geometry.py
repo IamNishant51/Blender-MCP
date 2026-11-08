@@ -91,6 +91,9 @@ class Vector:
 
     __rmul__ = __mul__
 
+    def __truediv__(self, scalar):
+        return Vector((self[0] / scalar, self[1] / scalar, self[2] / scalar))
+
     def __repr__(self):
         return f"Vector({tuple(self._v)})"
 
@@ -247,14 +250,39 @@ class _FakeImages:
         return _FakeImage(path)
 
 
+class _FakePolygon:
+    def __init__(self):
+        self.use_smooth = False
+
+
 class _FakeMeshData:
     def __init__(self):
         self.materials = []
+        # Fake polygons so generated smooth-shading code runs in the harness.
+        self.polygons = [_FakePolygon() for _ in range(6)]
 
 
 class _FakeLightData:
     def __init__(self):
         self.energy = 0
+
+
+class _FakeModifier:
+    def __init__(self, name, mtype):
+        self.name = name
+        self.type = mtype
+
+
+class _FakeModifiers:
+    """Minimal stand-in for obj.modifiers (bevel / subdivision helpers)."""
+
+    def __init__(self):
+        self._mods = []
+
+    def new(self, name, type):
+        mod = _FakeModifier(name, type)
+        self._mods.append(mod)
+        return mod
 
 
 class FakeObject:
@@ -268,6 +296,7 @@ class FakeObject:
         self.scale = Vector((1.0, 1.0, 1.0))
         self.rotation_euler = (0.0, 0.0, 0.0)
         self.data = _FakeMeshData() if kind == "MESH" else _FakeLightData()
+        self.modifiers = _FakeModifiers()
         self._selected = False
 
     def select_set(self, state):
@@ -458,6 +487,9 @@ class _FakeData:
     class _Materials:
         def new(self, name):
             return _FakeMaterial(name)
+
+        def get(self, name, default=None):
+            return default
 
 
 class _FakeOps:
