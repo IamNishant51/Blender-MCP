@@ -29,6 +29,7 @@ from blender_mcp.config import BlenderConfig, PathsConfig, ServerConfig
 from blender_mcp.server import BlenderMCPServer
 from blender_mcp.utils import setup_logging
 from blender_mcp.spec import validate_spec, build_from_spec
+from blender_mcp.grounding import mint_grounding
 from blender_mcp.materials import MaterialLibrary, get_smart_uv_script, pick_polyhaven_maps
 
 
@@ -331,12 +332,19 @@ def test_all_templates_compile(server):
 VALID_TABLE_SPEC = {
     "objects": [
         {"name": "Table", "kind": "cube", "size_m": [1.2, 0.8, 0.05],
-         "position_m": [0, 0, 0.7], "material": "wood"},
+         "position_m": [0, 0, 0.7], "material": "wood", "dimension_source": "measured"},
         {"name": "Leg", "kind": "cylinder", "size_m": [0.08, 0.08, 0.7],
-         "position_m": [0, 0, 0], "attach": "grounded"},
+         "position_m": [0, 0, 0], "attach": "grounded", "material": "steel",
+         "dimension_source": "measured"},
         {"name": "Top", "kind": "cube", "size_m": [1.2, 0.8, 0.05],
-         "position_m": [0, 0, 0.75], "attach": "on_top_of:Table"},
-    ]
+         "position_m": [0, 0, 0.75], "attach": "on_top_of:Table", "material": "wood",
+         "dimension_source": "measured"},
+    ],
+    # v1.3.1: every build needs grounding — minted here, as research_model
+    # would mint it in production.
+    "grounding": mint_grounding(
+        "research_model", query="wooden table",
+        references=[{"name": "Wooden table", "source": "test", "url": "https://example.com/table"}]),
 }
 
 
@@ -1088,9 +1096,10 @@ def test_build_from_spec_marble_and_skin_with_real_blender(server, tmp_path):
     server.model_builder.config.blender.executable = blender
     server.model_builder.config.blender.timeout = 300
     spec = {"objects": [
-        {"name": "Slab", "kind": "cube", "size_m": [0.3, 0.2, 0.05], "position_m": [0, 0, 0], "material": "marble"},
-        {"name": "Head", "kind": "sphere", "size_m": [0.12, 0.12, 0.12], "position_m": [0, 0, 0.05], "material": "skin"},
-    ]}
+        {"name": "Slab", "kind": "cube", "size_m": [0.3, 0.2, 0.05], "position_m": [0, 0, 0], "material": "marble", "dimension_source": "measured"},
+        {"name": "Head", "kind": "sphere", "size_m": [0.12, 0.12, 0.12], "position_m": [0, 0, 0.05], "material": "skin", "dimension_source": "measured"},
+    ],
+        "grounding": VALID_TABLE_SPEC["grounding"]}
     built = asyncio.run(server._build_from_spec({"spec": spec}))
     assert built["success"], built.get("error")
     assert {o["name"] for o in built["objects"]} == {"Slab", "Head"}

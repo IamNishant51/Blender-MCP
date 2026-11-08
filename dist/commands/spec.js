@@ -27,9 +27,11 @@
  *   0.05 m tolerance
  */
 import { getMaterialScript } from './model.js';
+import { DIMENSION_SOURCES, specMatchesLibrary } from './grounding.js';
 export const WORK_AREA_HALF = 5.0; // |x|, |y| <= 5 m
 export const WORK_AREA_HEIGHT = 10.0; // z <= 10 m
 export const ATTACH_TOLERANCE = 0.05; // m
+export const CONTACT_TOLERANCE = 0.01; // m — a part must touch the ground or another part
 export const KINDS = ['cube', 'sphere', 'cylinder', 'cone', 'torus'];
 // Mate helpers emitted into every generated script. Placement is solved
 // from the parent's bounding box at build time, never from guessed
@@ -140,6 +142,7 @@ export function validateSpec(spec) {
     }
     const errors = [];
     const byName = new Map();
+    const specDefaultSource = spec.dimension_source;
     for (let i = 0; i < objects.length; i++) {
         const obj = objects[i];
         const label = obj?.name ?? `objects[${i}]`;
@@ -160,16 +163,44 @@ export function validateSpec(spec) {
             continue;
         }
         ['x', 'y', 'z'].forEach((axis, idx) => {
-            if (!(obj.size_m[idx] > 0)) {
+            if (!Number.isFinite(obj.size_m[idx])) {
+                errors.push(`${obj.name}: size_m.${axis} must be a finite number, got ${obj.size_m[idx]}`);
+            }
+            else if (!(obj.size_m[idx] > 0)) {
                 errors.push(`${obj.name}: size_m.${axis} must be > 0, got ${obj.size_m[idx]}`);
             }
         });
+        if (obj.size_m.every((v) => v === 1)) {
+            errors.push(`${obj.name}: size_m ${JSON.stringify(obj.size_m)} is the [1, 1, 1] unit placeholder — replace it with real dimensions from research, the dimension library (get_dimensions) or a measurement, and state the source`);
+        }
         if (!isVec3(obj.position_m)) {
             errors.push(`${obj.name}: position_m must be [x, y, z] numbers`);
             continue;
         }
+        ['x', 'y', 'z'].forEach((axis, idx) => {
+            if (!Number.isFinite(obj.position_m[idx])) {
+                errors.push(`${obj.name}: position_m.${axis} must be a finite number, got ${obj.position_m[idx]}`);
+            }
+        });
         if (obj.position_m[2] < 0) {
             errors.push(`${obj.name}: position_m.z must be >= 0 (ground), got ${obj.position_m[2]}`);
+        }
+        // Every part needs a stated dimension source — a number with no
+        // provenance is an invented number.
+        const source = obj.dimension_source ?? specDefaultSource;
+        if (!source) {
+            errors.push(`${obj.name}: missing 'dimension_source' — state where the dimensions came from: ${DIMENSION_SOURCES.join(', ')}`);
+        }
+        else if (!DIMENSION_SOURCES.includes(source)) {
+            errors.push(`${obj.name}: dimension_source ${JSON.stringify(source)} is not one of ${DIMENSION_SOURCES.join(', ')}`);
+        }
+        // Every part needs a material — an unmaterialed part renders flat grey.
+        if (!obj.material) {
+            errors.push(`${obj.name}: missing 'material' — every part must name a material (wood, metal, glass, fabric, steel, ...)`);
+        }
+        if (obj.rotation_deg !== undefined && (!isVec3(obj.rotation_deg) || !obj.rotation_deg.every((v) => Number.isFinite(v)))) {
+            errors.push(`${obj.name}: rotation_deg must be [x, y, z] finite numbers`);
+            continue;
         }
         const { lo, hi } = objectBounds(obj);
         if (lo[0] < -WORK_AREA_HALF || hi[0] > WORK_AREA_HALF) {
@@ -225,6 +256,48 @@ export function validateSpec(spec) {
             errors.push(`${obj.name}: attach ${JSON.stringify(attach)} is not 'grounded', 'on_top_of:<name>' or 'centred_on:<name>'`);
         }
     }
+    // Floating check: a part with no mate (or a centred_on mate, whose z
+    // still comes from position_m) must sit on the ground or touch
+    // another part's bounding box. A part that touches nothing is floating
+    // and is rejected — the failure VLMs miss most often.
+    const boundsMap = new Map();
+    for (const obj of objects) {
+        if (typeof obj === 'object' && obj !== null && obj.name) {
+            try {
+                boundsMap.set(obj.name, objectBounds(obj));
+            }
+            catch {
+                // bounds errors are reported by the per-object checks above
+            }
+        }
+    }
+    for (const obj of objects) {
+        if (typeof obj !== 'object' || obj === null || !obj.name)
+            continue;
+        const attach = obj.attach ?? '';
+        if (attach === 'grounded' || (typeof attach === 'string' && attach.startsWith('on_top_of:')))
+            continue;
+        const own = boundsMap.get(obj.name);
+        if (!own)
+            continue;
+        if (own.lo[2] <= CONTACT_TOLERANCE)
+            continue; // grounded
+        let touches = false;
+        for (const [otherName, other] of boundsMap) {
+            if (otherName === obj.name)
+                continue;
+            const overlap = [0, 1, 2].map((i) => Math.min(own.hi[i], other.hi[i]) - Math.max(own.lo[i], other.lo[i]));
+            if (overlap.every((v) => v >= -CONTACT_TOLERANCE)) {
+                touches = true;
+                break;
+            }
+        }
+        if (!touches) {
+            errors.push(`${obj.name}: FLOATING — bottom z = ${own.lo[2].toFixed(3)} m, touches nothing and is not on the ground. Give it an attach mate (grounded / on_top_of:<name>) or move it so it touches another part`);
+        }
+    }
+    // Library cross-check: 'library' claims must match the real numbers.
+    errors.push(...specMatchesLibrary(spec));
     return errors;
 }
 /**

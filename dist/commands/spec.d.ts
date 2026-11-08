@@ -29,6 +29,7 @@
 export declare const WORK_AREA_HALF = 5;
 export declare const WORK_AREA_HEIGHT = 10;
 export declare const ATTACH_TOLERANCE = 0.05;
+export declare const CONTACT_TOLERANCE = 0.01;
 export declare const KINDS: readonly ["cube", "sphere", "cylinder", "cone", "torus"];
 export type SpecKind = (typeof KINDS)[number];
 export interface SpecObject {
@@ -39,9 +40,13 @@ export interface SpecObject {
     rotation_deg?: [number, number, number];
     material?: string;
     attach?: string;
+    dimension_source?: string;
 }
 export interface SceneSpec {
     objects: SpecObject[];
+    product?: string;
+    dimension_source?: string;
+    grounding?: Record<string, unknown>;
 }
 export declare const MATE_HELPERS = "\n# --- mate helpers (placement solved from bounding boxes) ---\ndef _bbox_bottom_centre(obj):\n    lo, hi = _bounds_of([obj])\n    return ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2])\n\ndef _bbox_centre(obj):\n    lo, hi = _bounds_of([obj])\n    return ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)\n\ndef _bbox_top(obj):\n    return _bounds_of([obj])[1][2]\n\ndef grounded(size):\n    \"\"\"Bottom z of an object standing on the ground (z = 0).\"\"\"\n    return 0.0\n\ndef on_top_of(parent, size):\n    \"\"\"Bottom-centre of an object sitting on top of 'parent'.\"\"\"\n    cx, cy, _ = _bbox_centre(parent)\n    return (cx, cy, _bbox_top(parent))\n\ndef centred_on(parent, size):\n    \"\"\"Bottom-centre of an object centred horizontally on 'parent'.\"\"\"\n    cx, cy, _ = _bbox_centre(parent)\n    return (cx, cy, None)  # z comes from position_m\n";
 type Bounds = {

@@ -37,6 +37,16 @@ import {
   polyPizzaSearchStatus,
   KNOWN_GOOD_ASSETS,
 } from '../dist/commands/retrieve.js';
+import {
+  DIMENSION_LIBRARY,
+  checkGrounding,
+  getDimensions,
+  mintGrounding,
+  buildVerifyScript,
+  parseVerifyJson,
+  verifyBuildReport,
+  specMatchesLibrary,
+} from '../dist/commands/grounding.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const python = process.env.PYTHON || 'python3';
@@ -192,9 +202,9 @@ console.log('scene spec');
 {
   const valid = {
     objects: [
-      { name: 'Table', kind: 'cube', size_m: [1.2, 0.8, 0.05], position_m: [0, 0, 0.7], material: 'wood' },
-      { name: 'Leg', kind: 'cylinder', size_m: [0.08, 0.08, 0.7], position_m: [0, 0, 0], attach: 'grounded' },
-      { name: 'Top', kind: 'cube', size_m: [1.2, 0.8, 0.05], position_m: [0, 0, 0.75], attach: 'on_top_of:Table' },
+      { name: 'Table', kind: 'cube', size_m: [1.2, 0.8, 0.05], position_m: [0, 0, 0.7], material: 'wood', dimension_source: 'measured' },
+      { name: 'Leg', kind: 'cylinder', size_m: [0.08, 0.08, 0.7], position_m: [0, 0, 0], attach: 'grounded', material: 'steel', dimension_source: 'measured' },
+      { name: 'Top', kind: 'cube', size_m: [1.2, 0.8, 0.05], position_m: [0, 0, 0.75], attach: 'on_top_of:Table', material: 'wood', dimension_source: 'measured' },
     ],
   };
   check('spec: valid spec passes', validateSpec(valid).length === 0, validateSpec(valid).join('; '));
@@ -345,6 +355,35 @@ console.log('detail helpers');
   // hugs the cross-section — never a circle sized by max().
   const seamScript = getDetailScript('seam', 'Table', {});
   check('detail: seam is a unit torus scaled to the cross-section ellipse', seamScript.includes('major_radius=1.0') && seamScript.includes('_seam.scale') && !seamScript.includes('max(_size'));
+}
+
+// --- anti-hallucination grounding (v1.3.1) ---
+console.log('grounding');
+{
+  check('grounding: no grounding is refused', checkGrounding(null).length > 0 && checkGrounding(null)[0].includes('no grounding'));
+  check('grounding: fabricated grounding is refused', checkGrounding({ source: 'research_model', grounding_id: 'grd_madeup1234', query: 'coffee mug' }).length > 0);
+  const g = mintGrounding({ source: 'research_model', query: 'coffee mug', references: [{ name: 'Mug', source: 'test', url: 'https://example.com/mug' }] });
+  check('grounding: minted grounding validates', checkGrounding(g).length === 0);
+  check('grounding: reference grounding needs observed features', checkGrounding({ source: 'reference_image', reference: '/tmp/mug.png' }).length > 0);
+  check('grounding: reference grounding with features validates', checkGrounding({ source: 'reference_image', reference: '/tmp/mug.png', observed_features: ['MugBody', 'Handle'] }).length === 0);
+  check('grounding: library grounding needs a known product', checkGrounding({ source: 'dimension_library', product: 'teleporter' }).length > 0 && checkGrounding({ source: 'dimension_library', product: 'coffee_mug' }).length === 0);
+  const mug = getDimensions('coffee_mug');
+  check('grounding: library has real coffee mug numbers', mug.success === true && JSON.stringify(mug.overall_size_m) === JSON.stringify([0.111, 0.082, 0.088]));
+  check('grounding: library covers 15 products', Object.keys(DIMENSION_LIBRARY).length === 15);
+  check('grounding: library rickshaw matches Bajaj RE4S spec', JSON.stringify(DIMENSION_LIBRARY.rickshaw.overall_size_m) === JSON.stringify([2.658, 1.3, 1.7]));
+  check('grounding: unknown product fails cleanly', getDimensions('teleporter').success === false);
+  check('spec: rejects missing dimension_source', validateSpec({ objects: [{ name: 'X', kind: 'cube', size_m: [0.2, 0.2, 0.2], position_m: [0, 0, 0], material: 'wood' }] }).some((e) => e.includes('dimension_source')));
+  check('spec: rejects placeholder [1,1,1]', validateSpec({ objects: [{ name: 'X', kind: 'cube', size_m: [1, 1, 1], position_m: [0, 0, 0], material: 'wood', dimension_source: 'research' }] }).some((e) => e.includes('placeholder')));
+  check('spec: rejects missing material', validateSpec({ objects: [{ name: 'X', kind: 'cube', size_m: [0.2, 0.2, 0.2], position_m: [0, 0, 0], dimension_source: 'measured' }] }).some((e) => e.includes('material')));
+  check('spec: rejects floating part', validateSpec({ objects: [{ name: 'X', kind: 'cube', size_m: [0.2, 0.2, 0.2], position_m: [0, 0, 0.5], material: 'wood', dimension_source: 'research' }] }).some((e) => e.includes('FLOATING')));
+  check('spec: library claim must match library numbers', specMatchesLibrary({ product: 'coffee_mug', objects: [{ name: 'MugBody', size_m: [0.5, 0.5, 0.5], dimension_source: 'library' }] }).length > 0);
+  check('spec: library claim with real numbers passes', specMatchesLibrary({ product: 'coffee_mug', objects: [{ name: 'MugBody', size_m: [0.082, 0.082, 0.095], dimension_source: 'library' }] }).length === 0);
+  const vspec = { objects: [{ name: 'MugBody', size_m: [0.082, 0.082, 0.095] }] };
+  check('verify: script has VERIFY_JSON + material + feature checks', buildVerifyScript(JSON.stringify(vspec)).includes('VERIFY_JSON:') && buildVerifyScript(JSON.stringify(vspec)).includes('has_material:') && buildVerifyScript(JSON.stringify(vspec)).includes('observed_feature:'));
+  check('verify: missing payload is a failure', verifyBuildReport(vspec, null).passed === false);
+  check('verify: failing check is a failure', verifyBuildReport(vspec, { checks: [{ check: 'connected:Handle', passed: false, detail: 'FLOATING' }] }).passed === false);
+  check('verify: all passing is a success', verifyBuildReport(vspec, { checks: [{ check: 'part_count', passed: true, detail: 'ok' }] }).passed === true);
+  check('verify: parse VERIFY_JSON', parseVerifyJson('VERIFY_JSON:' + JSON.stringify({ checks: [{ check: 'part_count', passed: true, detail: 'ok' }] }))?.checks.length === 1);
 }
 
 // --- critique loop (v1.3.0) ---

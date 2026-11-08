@@ -90,7 +90,7 @@ export declare function getMaterialScript(materialType: string): string;
  */
 export declare function getSmartUVScript(): string;
 export declare const POLYHAVEN_API = "https://api.polyhaven.com";
-export declare const POLYHAVEN_USER_AGENT = "blender-mcp/1.3.0 (https://github.com/IamNishant51/Blender-MCP)";
+export declare const POLYHAVEN_USER_AGENT = "blender-mcp/1.3.1 (https://github.com/IamNishant51/Blender-MCP)";
 export declare const POLYHAVEN_LICENCE = "CC0";
 export interface PolyHavenMaps {
     color?: string;

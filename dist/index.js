@@ -16,6 +16,7 @@ import { getDetailScript, DETAIL_TYPES } from './commands/details.js';
 import { getProductScript, getRetrievedProductScript, PRODUCTS } from './commands/products.js';
 import { retrieveAsset } from './commands/retrieve.js';
 import { buildCritiqueScript, parseCritiqueJson, buildCritiquePrompt, MAX_REFINE_ROUNDS, CRITIQUE_NOTE, } from './commands/critique.js';
+import { checkGrounding, getDimensions, mintGrounding, buildVerifyScript, parseVerifyJson, verifyBuildReport, } from './commands/grounding.js';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import { inflateSync } from 'zlib';
 import { join } from 'path';
@@ -66,7 +67,7 @@ class BlenderMCPServer {
             tools: [
                 {
                     name: 'research_model',
-                    description: 'RESEARCH FIRST: Research a model before any code is written. Runs the model/texture search and returns top references (name, source, url) plus the part-breakdown schema. PREFER A REAL ASSET OVER PRIMITIVES: if a Poly Haven / Sketchfab / Poly Pizza asset in the results fits the request, the result names it as recommended_path — import it with import_from_url instead of modelling from primitives. Optional reference_image (local path or URL): with a generation key (MESHY_API_KEY / TRIPO_API_KEY) it drives image-to-3D via generate_3d (route A); without one it is the visual reference the spec is built from — parts, proportions, colours, materials recorded in the spec (route B). Use the references to work out the real parts and dimensions, then produce a JSON scene spec and call build_from_spec. No code is written before this step.',
+                    description: 'RESEARCH FIRST — MANDATORY, ENFORCED IN CODE: Research a model before any code is written. Runs the model/texture search and returns top references (name, source, url) plus the part-breakdown schema AND a grounding record. build_from_spec REFUSES any build without that grounding record — there is no way to build without researching first. PREFER A REAL ASSET OVER PRIMITIVES: if a Poly Haven / Sketchfab / Poly Pizza asset in the results fits the request, the result names it as recommended_path — import it with import_from_url instead of modelling from primitives. For real numbers, call get_dimensions for the product (built-in library of researched dimensions). Optional reference_image (local path or URL): with a generation key (MESHY_API_KEY / TRIPO_API_KEY) it drives image-to-3D via generate_3d (route A); without one it is the visual reference the spec is built from — parts, proportions, colours, materials recorded in the spec (route B), and you MUST list the features you actually observed in the image in grounding.observed_features — the post-build check confirms each one exists in the model. Use the references to work out the real parts and dimensions, then produce a JSON scene spec and call build_from_spec. No code is written before this step.',
                     inputSchema: {
                         type: 'object',
                         properties: {
@@ -77,12 +78,24 @@ class BlenderMCPServer {
                     },
                 },
                 {
+                    name: 'get_dimensions',
+                    description: 'REAL DIMENSIONS LIBRARY: return researched real-world dimensions for a product — overall size plus per-part sizes in metres, each with its source ([S] = sourced, [E] = estimate from a sourced envelope). Use this instead of inventing numbers: a spec part that claims dimension_source \'library\' is checked against these exact numbers and rejected if it does not match within 10%. Products: headphones, sneaker, perfume, smartwatch, chair, temple, rickshaw, thali, haveli, character, spaceship, alien, robot, coffee_mug, desk_lamp. No argument lists all products.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            product: { type: 'string', description: "Product name, e.g. 'coffee_mug'. Omit to list all products." },
+                        },
+                        required: [],
+                    },
+                },
+                {
                     name: 'build_from_spec',
-                    description: 'BUILD FROM SPEC: Build a scene from a JSON scene spec {objects: [{name, kind, size_m, position_m, rotation_deg, material, attach}]}. Conventions: position_m is the BOTTOM-CENTRE of the object, sizes in metres, Z-up, ground z = 0; kind is cube/sphere/cylinder/cone/torus; attach is a mate (grounded, on_top_of:<name>, centred_on:<name>) solved from the parent bounding box. The spec is validated first (sizes > 0, z >= 0, inside a 10 m work area, mates must touch within 0.05 m); on failure the exact failed checks are returned and nothing is built. On success returns object names, bounding boxes and min z.',
+                    description: 'BUILD FROM SPEC — GROUNDED BUILDS ONLY: Build a scene from a JSON scene spec {objects: [{name, kind, size_m, position_m, rotation_deg, material, attach, dimension_source}]} PLUS the grounding record from research_model (pass it as the \'grounding\' argument or inside the spec as spec.grounding). A BUILD WITH NO VALID GROUNDING IS REFUSED — no silent fallback, no default template, no best-guess model. Conventions: position_m is the BOTTOM-CENTRE of the object, sizes in metres, Z-up, ground z = 0; kind is cube/sphere/cylinder/cone/torus; attach is a mate (grounded, on_top_of:<name>, centred_on:<name>) solved from the parent bounding box. STRICT VALIDATION (enforced in code, exact failed checks returned): every size > 0, finite, and not the [1, 1, 1] placeholder; every position.z >= 0; every part declares dimension_source (measured / research / library / reference_image / retrieved_asset) — a \'library\' claim must match get_dimensions within 10%; every part has a material; bounding boxes inside a 10 m work area; no floating parts (every part grounded or touching another part). After Blender runs, the saved .blend is re-opened and VERIFIED against the spec (part presence, min z >= 0, every part has a material, dimensions vs spec, connectivity, observed reference features) — if any check fails the tool reports success:false with the exact mismatch, never success:true on a bad build.',
                     inputSchema: {
                         type: 'object',
                         properties: {
                             spec: { description: 'Scene spec object, or a JSON string of one' },
+                            grounding: { description: 'Grounding record returned by research_model (required). May also be given inside the spec as spec.grounding.' },
                         },
                         required: ['spec'],
                     },
@@ -143,7 +156,7 @@ class BlenderMCPServer {
                 },
                 {
                     name: 'build_product',
-                    description: 'PROPER PRODUCT BUILD: build one of the catalogue products with real curves, not stacked primitives — headphones (arched band + padded cups), sneaker (lofted sole with toe spring + bezier laces through eyelets), perfume (bevelled glass, seated gold cap, NOIR label), smartwatch (bevelled case, real dial with markers + hands, curved strap). Source \'auto\' (default) prefers a retrieved real asset for products that have one (smartwatch -> Poly Haven CC0 digital watch) and falls back to the procedural builder with a note; \'procedural\' forces the builder; \'retrieved\' fails if no asset is available. Returns the saved .blend path, object names, bounding boxes and min z.',
+                    description: 'PROPER PRODUCT BUILD: build one of the catalogue products with real curves, not stacked primitives — headphones (arched band + padded cups), sneaker (lofted sole with toe spring + bezier laces through eyelets), perfume (bevelled glass, seated gold cap, NOIR label), smartwatch (bevelled case, real dial with markers + hands, curved strap). Source \'auto\' (default) prefers a retrieved real asset for products that have one (smartwatch -> Poly Haven CC0 digital watch) and falls back to the procedural builder with a note; \'procedural\' forces the builder; \'retrieved\' fails if no asset is available. GROUNDED BY CONSTRUCTION: the procedural builders use real dimensions from the built-in dimension library (see get_dimensions) and the retrieved path uses a real asset — the result carries its grounding record. Every build is post-build verified (parts present, min z >= 0, every part has a material, parts connected) before success is reported. Returns the saved .blend path, object names, bounding boxes and min z.',
                     inputSchema: {
                         type: 'object',
                         properties: {
@@ -170,7 +183,7 @@ class BlenderMCPServer {
                 },
                 {
                     name: 'critique_model',
-                    description: 'VISION CRITIQUE LOOP: render 5 views of a saved .blend (front 3/4, side, back, top, close-up), run programmatic checks (PNG exists and decodes, every spec part present, min z >= 0, parts connected/grounded, dimensions vs spec), and return the views plus a structured critique prompt. HONEST LIMIT: this MCP cannot see images — YOU, the calling model, are the critic: look at the rendered PNGs and fill in the per-spec-item pass/fail, problem->fix pairs (concrete operations on named parts), 8-dimension scores and the dual Yes/No gate from the prompt template. Then apply fixes as LOCALISED EDITS (add_detail / execute_blender_code on the same build, never a rebuild), re-render, and verify per fix (applied / not applied / regressed). Max 3 auto-refine rounds; keep the best render + code and REVERT if a round makes things worse. refine_round tracks the round (1-3).',
+                    description: 'VISION CRITIQUE LOOP: render 5 views of a saved .blend (front 3/4, side, back, top, close-up), run programmatic checks (PNG exists and decodes, every spec part present, min z >= 0, parts connected/grounded, dimensions vs spec), and return the views plus a structured critique prompt. HONEST LIMIT: this MCP cannot see images — YOU, the calling model, are the critic: look at the rendered PNGs and fill in the per-spec-item pass/fail, problem->fix pairs (concrete operations on named parts), 8-dimension scores and the dual Yes/No gate from the prompt template. Then apply fixes as LOCALISED EDITS (add_detail / execute_blender_code on the same build, never a rebuild), re-render, and verify per fix (applied / not applied / regressed). Max 3 auto-refine rounds; keep the best render + code and REVERT if a round makes things worse. refine_round tracks the round (1-3). ALWAYS run this after a build and before calling the model done — the programmatic checks catch the floating/disconnected parts a VLM misses, and the dual gate (content match + geometric quality) is the final acceptance test. If the spec carried grounding.observed_features from a reference image, check each observed feature is visible.',
                     inputSchema: {
                         type: 'object',
                         properties: {
@@ -185,7 +198,7 @@ class BlenderMCPServer {
                 },
                 {
                     name: 'create_complex_model',
-                    description: 'CREATE: Build complex 3D models with internet search + detailed planning. Built-in templates only: temple/mandir, auto-rickshaw/vehicle, thali/food, haveli/palace/building, person/human/character. For anything else use execute_blender_code.',
+                    description: 'CREATE: Build complex 3D models with internet search + detailed planning. Built-in templates only: temple/mandir, auto-rickshaw/vehicle, thali/food, haveli/palace/building, person/human/character. These templates use researched real dimensions (see get_dimensions), so they are grounded by construction. For anything else use research_model first, then build_from_spec with its grounding record — or execute_blender_code with a grounding record and a spec so the build can be verified.',
                     inputSchema: {
                         type: 'object',
                         properties: {
@@ -197,11 +210,13 @@ class BlenderMCPServer {
                 },
                 {
                     name: 'execute_blender_code',
-                    description: 'CODE: Run arbitrary Blender Python (bpy) code in a headless Blender and save the resulting scene. Use this for ANY model that is not one of the five built-in templates (temple/mandir, auto-rickshaw/vehicle, thali/food, haveli/palace/building, person/human/character). Write Z-up code: Z is height, ground is z = 0, all dimensions in metres, every part\'s lowest point at z >= 0. The script runs in a fresh empty scene; the result includes Blender\'s stdout/stderr and the output .blend path. Fix errors from the returned stderr and call again.',
+                    description: 'CODE: Run arbitrary Blender Python (bpy) code in a headless Blender and save the resulting scene. RESEARCH FIRST: research the subject with research_model (or get_dimensions for a known product) BEFORE writing code, and pass its grounding record as \'grounding\' — builds without grounding are returned with an explicit UNVERIFIED warning and must be checked with critique_model. Pass a \'spec\' too and the build is post-build verified against it (part presence, min z >= 0, materials, dimensions, connectivity); a failed check reports success:false. Use this for ANY model that is not one of the five built-in templates (temple/mandir, auto-rickshaw/vehicle, thali/food, haveli/palace/building, person/human/character) or a build_product product. Write Z-up code: Z is height, ground is z = 0, all dimensions in metres, every part\'s lowest point at z >= 0, every part touching the ground or another part, every part with a material. A script that creates no meshes, or any mesh below the ground, reports failure. The script runs in a fresh empty scene; the result includes Blender\'s stdout/stderr and the output .blend path. Fix errors from the returned stderr and call again.',
                     inputSchema: {
                         type: 'object',
                         properties: {
                             code: { type: 'string', description: 'Blender Python code using bpy (imports bpy itself if needed)' },
+                            grounding: { type: 'object', description: 'Grounding record from research_model (recommended — without it the build is returned UNVERIFIED)' },
+                            spec: { type: 'object', description: 'Optional scene spec {objects: [{name, size_m, material}]} — the build is post-build verified against it' },
                         },
                         required: ['code'],
                     },
@@ -291,6 +306,8 @@ class BlenderMCPServer {
                 return this.addDetail(args);
             case 'critique_model':
                 return this.critiqueModel(args);
+            case 'get_dimensions':
+                return getDimensions(args.product);
             case 'search_models':
                 return this.searchService.searchModels(args.query);
             case 'search_textures':
@@ -341,12 +358,92 @@ class BlenderMCPServer {
             error: result.error || '',
         };
     }
+    /**
+     * Post-build verification (v1.3.1 anti-hallucination gate). Re-opens
+     * the saved .blend in Blender and checks it against the spec (part
+     * presence, min z >= 0, every part has a material, dimensions vs
+     * spec, connectivity, observed reference features). A build whose
+     * verification fails — or cannot run — is reported as failure,
+     * never success:true.
+     */
+    async verifyBlend(blendPath, spec) {
+        const scriptPath = join(this.config.paths.tempDir, `verify_${Date.now()}.py`);
+        writeFileSync(scriptPath, buildVerifyScript(JSON.stringify(spec)));
+        try {
+            const result = await this.modelBuilder.runBlenderArgs(['--background', blendPath, '--python', scriptPath], Math.max(this.config.blender.timeout, 120));
+            if (!result.success) {
+                return {
+                    passed: false,
+                    checks: [{ check: 'verification_ran', passed: false, detail: `verification script failed: ${result.error || ''}` }],
+                };
+            }
+            return verifyBuildReport(spec, parseVerifyJson(result.stdout ?? ''));
+        }
+        finally {
+            try {
+                const { unlinkSync } = await import('fs');
+                unlinkSync(scriptPath);
+            }
+            catch {
+                // Ignore cleanup errors
+            }
+        }
+    }
     async executeBlenderCode(args) {
         const code = args.code || '';
         if (!code.trim()) {
             return { success: false, error: 'No code supplied.' };
         }
-        return this.modelBuilder.createMesh(code);
+        // v1.3.1: the free-form escape hatch no longer reports silent
+        // success. Zero meshes, or any mesh below the ground, is a failure.
+        // A grounding record and/or spec gets the full post-build verification.
+        const result = (await this.modelBuilder.createMeshWithReport(code));
+        if (!result.success)
+            return result;
+        const objects = result.objects ?? [];
+        if (objects.length === 0) {
+            return {
+                success: false,
+                output: result.output || '',
+                error: 'Blender ran but created no mesh objects — the build produced nothing.',
+                stdout: result.stdout || '',
+            };
+        }
+        if (typeof result.min_z === 'number' && result.min_z < -0.001) {
+            return {
+                success: false,
+                output: result.output || '',
+                objects,
+                min_z: result.min_z,
+                error: `Build failed verification: min z = ${result.min_z.toFixed(4)} m is below the ground (z = 0).`,
+                stdout: result.stdout || '',
+            };
+        }
+        const grounding = args.grounding;
+        const spec = args.spec;
+        if (grounding !== undefined && grounding !== null) {
+            const groundingErrors = checkGrounding(grounding);
+            if (groundingErrors.length > 0) {
+                result.grounding_warning = 'Grounding supplied but invalid: ' + groundingErrors.join('; ');
+            }
+            else {
+                result.grounding = grounding;
+            }
+        }
+        else if (spec === undefined || spec === null) {
+            result.grounding_warning =
+                'UNVERIFIED BUILD: no grounding supplied. Research first (research_model) and pass its grounding record — or a spec — so the build can be verified. Render the result and check it with critique_model before trusting it; dimensions in this code were not checked against any source.';
+        }
+        if (spec !== undefined && spec !== null) {
+            const verification = await this.verifyBlend(String(result.output), spec);
+            result.verification = verification;
+            if (!verification.passed) {
+                const failed = verification.checks.filter((c) => !c.passed);
+                result.success = false;
+                result.error = 'Build verification FAILED: ' + failed.map((c) => `${c.check} (${c.detail})`).join('; ');
+            }
+        }
+        return result;
     }
     async researchModel(args) {
         const query = args.query || '';
@@ -405,9 +502,18 @@ class BlenderMCPServer {
                 ...(isUrl ? {} : { warning: exists ? undefined : `Local file not found: ${referenceImage}. Check the path and call again.` }),
             };
         }
+        // v1.3.1: research issues the grounding record that build_from_spec
+        // demands. No grounding = no build. A reference image grounds the
+        // build too — but the calling model must list the features it
+        // actually observed in the image (observed_features); the
+        // post-build check confirms each one exists in the model.
+        const grounding = referenceImage
+            ? mintGrounding({ source: 'reference_image', query, reference: referenceImage, references })
+            : mintGrounding({ source: 'research_model', query, references });
         return {
             success: true,
             query,
+            grounding,
             references,
             texture_references: textureReferences,
             recommended_path: recommendedPath,
@@ -423,6 +529,7 @@ class BlenderMCPServer {
                         rotation_deg: [0, 0, 0],
                         material: 'wood | marble | metal | fabric | steel | glass | skin | sandstone | ...',
                         attach: 'grounded | on_top_of:<ParentName> | centred_on:<ParentName>',
+                        dimension_source: 'measured | research | library | reference_image | retrieved_asset',
                     },
                 ],
             },
@@ -432,8 +539,10 @@ class BlenderMCPServer {
                 'Bounding boxes must stay inside a 10 m work area (|x|, |y| <= 5, z <= 10).',
                 'attach mates are solved from the parent bounding box, never guessed: on_top_of:<name> means the part sits on the parent and must touch it within 0.05 m.',
                 'Use the references above for real proportions; do not invent dimensions.',
+                "ANTI-HALLUCINATION (enforced in code): every part MUST declare dimension_source (measured / research / library / reference_image / retrieved_asset) and a material. A part claiming 'library' must match the built-in dimension library — call get_dimensions for the real numbers. A part that touches nothing and is not on the ground is rejected as floating. The [1, 1, 1] unit size is a rejected placeholder.",
+                "Pass the 'grounding' record above to build_from_spec (as the grounding argument or inside the spec). A build with no grounding is REFUSED. With a reference image, fill grounding.observed_features with the features you actually saw in the image.",
             ],
-            next_step: 'Produce a JSON scene spec in the schema above (from the references and real dimensions) and call build_from_spec with it. No code is written before this step.',
+            next_step: 'Produce a JSON scene spec in the schema above (from the references and real dimensions) and call build_from_spec with it AND the grounding record above. No code is written before this step.',
         };
     }
     async buildFromSpecTool(args) {
@@ -441,20 +550,68 @@ class BlenderMCPServer {
         if (spec === undefined || spec === null || spec === '') {
             return { success: false, error: 'No spec supplied. Call research_model first, then pass a scene spec object (or JSON string).' };
         }
-        const { script, errors } = buildFromSpec(spec);
+        const parsed = typeof spec === 'string' ? (() => { try {
+            return JSON.parse(spec);
+        }
+        catch {
+            return null;
+        } })() : spec;
+        if (parsed === null || typeof parsed !== 'object') {
+            return { success: false, errors: ['spec is not valid JSON'], error: 'Spec validation failed: spec is not valid JSON' };
+        }
+        const { script, errors } = buildFromSpec(parsed);
         if (!script) {
             return { success: false, errors, error: `Spec validation failed: ${errors.join('; ')}` };
         }
-        const result = await this.modelBuilder.createMeshWithReport(script);
+        // v1.3.1 enforcement: a grounding record is REQUIRED — a build with
+        // no research is refused — and the saved .blend is verified against
+        // the spec before any success is reported.
+        const grounding = args.grounding ?? parsed.grounding;
+        const groundingErrors = checkGrounding(grounding);
+        if (groundingErrors.length > 0) {
+            return {
+                success: false,
+                errors: groundingErrors,
+                error: `Build refused — no valid research grounding: ${groundingErrors.join('; ')}`,
+            };
+        }
+        parsed.grounding = grounding;
+        const result = (await this.modelBuilder.createMeshWithReport(script));
+        if (!result.success) {
+            return {
+                success: false,
+                output: result.output || '',
+                objects: result.objects || [],
+                error: result.error || '',
+                stdout: result.stdout || '',
+            };
+        }
+        const verification = await this.verifyBlend(String(result.output), parsed);
+        if (!verification.passed) {
+            const failed = verification.checks.filter((c) => !c.passed);
+            return {
+                success: false,
+                output: result.output || '',
+                objects: result.objects || [],
+                scene_min: result.scene_min || [],
+                scene_max: result.scene_max || [],
+                min_z: result.min_z,
+                verification,
+                error: 'Build verification FAILED: ' + failed.map((c) => `${c.check} (${c.detail})`).join('; '),
+                stdout: result.stdout || '',
+            };
+        }
         return {
-            success: result.success,
+            success: true,
             output: result.output || '',
             objects: result.objects || [],
             scene_min: result.scene_min || [],
             scene_max: result.scene_max || [],
             min_z: result.min_z,
+            grounding,
+            verification,
             stdout: result.stdout || '',
-            error: result.error || '',
+            error: '',
         };
     }
     /**
@@ -629,6 +786,25 @@ class BlenderMCPServer {
         };
         return retrieveAsset(opts, cacheDir, fetch, (p, d) => writeFileSync(p, d), (p) => mkdirSync(p, { recursive: true }));
     }
+    /**
+     * v1.3.1: attach the grounding record and post-build verification to a
+     * build_product result. A failed verification flips the build to
+     * success:false — never success:true on a bad build.
+     */
+    async verifyProductResult(result, product, source, grounding, extra) {
+        const out = { ...result, product, source, grounding, ...(extra ?? {}) };
+        if (result.success) {
+            const verifySpec = { objects: (result.objects ?? []).map((o) => ({ name: o.name })) };
+            const verification = await this.verifyBlend(String(result.output), verifySpec);
+            out.verification = verification;
+            if (!verification.passed) {
+                const failed = verification.checks.filter((c) => !c.passed);
+                out.success = false;
+                out.error = 'Build verification FAILED: ' + failed.map((c) => `${c.check} (${c.detail})`).join('; ');
+            }
+        }
+        return out;
+    }
     async buildProduct(args) {
         const product = (args.product || '').toLowerCase().trim();
         if (!PRODUCTS[product]) {
@@ -646,7 +822,13 @@ class BlenderMCPServer {
             if (retrieved.success && asset?.gltf_path) {
                 const script = getRetrievedProductScript(String(asset.gltf_path), targetSize);
                 const result = await this.modelBuilder.createMeshWithReport(script);
-                return { ...result, product, source: 'retrieved', asset };
+                // v1.3.1: a retrieved real asset IS the grounding — and the build
+                // is still verified before success is reported.
+                return this.verifyProductResult(result, product, 'retrieved', {
+                    source: 'retrieved_asset',
+                    product,
+                    asset: { gltf_path: asset.gltf_path, url: asset.source_url },
+                }, { asset });
             }
             if (source === 'retrieved') {
                 return { success: false, product, source: 'retrieved', error: String(retrieved.error || 'Retrieved asset unavailable.'), note: 'Call build_product with source \'procedural\' for the fallback builder.' };
@@ -656,13 +838,16 @@ class BlenderMCPServer {
             if (!script)
                 return { success: false, product, error };
             const result = await this.modelBuilder.createMeshWithReport(script);
-            return { ...result, product, source: 'procedural', note };
+            return this.verifyProductResult(result, product, 'procedural', { source: 'dimension_library', product }, { note });
         }
         const [script, error] = getProductScript(product);
         if (!script)
             return { success: false, product, error };
         const result = await this.modelBuilder.createMeshWithReport(script);
-        return { ...result, product, source: 'procedural' };
+        // v1.3.1: the procedural builders use real dimensions from the
+        // built-in dimension library, so the build is grounded by
+        // construction — and still verified before success is reported.
+        return this.verifyProductResult(result, product, 'procedural', { source: 'dimension_library', product });
     }
     async addDetail(args) {
         const detail = args.detail || '';

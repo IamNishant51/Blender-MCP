@@ -85,9 +85,12 @@ for o in meshes:
     lo, hi = _bounds_map[o.name]
     checks.append({"check": f"min_z:{o.name}", "passed": lo.z >= -0.001,
                    "detail": f"min z = {lo.z:.4f} m"})
-    vol = (hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z)
-    checks.append({"check": f"non_degenerate:{o.name}", "passed": vol > 1e-9,
-                   "detail": f"bbox volume = {vol:.6f} m^3"})
+    ext = (hi.x - lo.x, hi.y - lo.y, hi.z - lo.z)
+    # Flat parts (converted label text, decal plates) legitimately have
+    # zero volume — they are planes, not degenerate objects. Fail only a
+    # part with no extent at all (a point).
+    checks.append({"check": f"non_degenerate:{o.name}", "passed": max(ext) > 1e-6,
+                   "detail": f"bbox extents = {[round(v, 4) for v in ext]} m"})
 
 # 3. Dimensions vs spec (when the spec gives sizes), within 10%.
 for name, item in _expected.items():

@@ -31,6 +31,49 @@ Blender MCP enables AI assistants to control Blender programmatically, allowing 
 
 ---
 
+## What's new in 1.3.1 — anti-hallucination guarantees
+
+Any AI agent (Claude, ChatGPT, any MCP client) that connects to this server
+gets accurate models — the guardrails are enforced in code, not just in
+documentation:
+
+- **Research-first, enforced:** `build_from_spec` REFUSES a build with no
+  grounding record. `research_model` issues the record (query + references);
+  a reference image, a retrieved real asset, or the built-in dimension
+  library ground a build too. No silent fallback, no default template, no
+  "best guess" model. A fabricated grounding id is refused.
+- **Strict spec validation:** every part declares `dimension_source`
+  (`measured` / `research` / `library` / `reference_image` /
+  `retrieved_asset`) and a `material`. Rejected with the exact failed check:
+  missing / zero / negative / non-finite / placeholder (`[1, 1, 1]`)
+  dimensions, missing material, parts outside the 10 m work area, z < 0,
+  and floating parts (a part that touches nothing and is not on the ground).
+  A part claiming `library` must match the library's real numbers within 10%.
+- **New tool `get_dimensions` — real-world dimension library:** researched
+  dimensions for 15 products (headphones, sneaker, perfume, smartwatch,
+  chair, temple, rickshaw, thali, haveli, character, spaceship, alien,
+  robot, coffee_mug, desk_lamp) — overall size plus per-part sizes in
+  metres, each with its source (`[S]` sourced, `[E]` estimate from a
+  sourced envelope). Rickshaw: Bajaj RE4S brochure (2.658 × 1.300 × 1.700 m);
+  thali plate: GeM canteen spec (Ø 0.320 m); character: ANSUR II (H 1.75 m,
+  7.5 heads); alien: classic Grey (H 1.30 m, 3.8 heads tall).
+- **Reference grounding:** when a reference image is supplied, the spec must
+  list the features actually observed in it (`grounding.observed_features`),
+  and the post-build check confirms each one exists in the model.
+- **Post-build verification before any success:** after Blender runs, the
+  saved `.blend` is re-opened and checked — part presence, part count vs
+  spec, min z ≥ 0, every part has a material, dimensions vs spec (10%),
+  connectivity/grounding, observed reference features. Any failed check
+  reports `success:false` with the exact mismatch — never `success:true`
+  on a bad build. `build_product` (grounded by construction: real-dimension
+  builders / real retrieved assets) is verified the same way.
+- **Guardrail tool descriptions:** every build tool's description instructs
+  ANY calling agent — research first, cite sources for every dimension,
+  build from the spec, verify with the render, fix and re-render.
+  `execute_blender_code` without grounding is returned with an explicit
+  UNVERIFIED warning, and a script that creates no meshes (or any mesh
+  below the ground) reports failure.
+
 ## What's new in 1.3.0
 
 - **New tool `generate_3d` — AI generation (Meshy first, Tripo second):**

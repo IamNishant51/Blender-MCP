@@ -33,6 +33,15 @@ from blender_mcp.materials import (
     POLYHAVEN_LICENCE,
 )
 from blender_mcp.spec import parse_spec, validate_spec, build_from_spec
+from blender_mcp.grounding import (
+    DIMENSION_LIBRARY,
+    check_grounding,
+    get_dimensions,
+    mint_grounding,
+    build_verify_script,
+    parse_verify_json,
+    verify_build_report,
+)
 from blender_mcp.render import build_render_script, RENDER_VIEWS
 from blender_mcp.generate import (
     run_generate_3d,
@@ -471,20 +480,26 @@ class BlenderMCPServer:
             Tool(
                 name="research_model",
                 description=(
-                    "RESEARCH FIRST: Research a model before any code is written. "
-                    "Runs the model/texture search and returns top references "
-                    "(name, source, url) plus the part-breakdown schema. PREFER A "
-                    "REAL ASSET OVER PRIMITIVES: if a Poly Haven / Sketchfab / "
-                    "Poly Pizza asset in the results fits the request, the result "
-                    "names it as recommended_path — import it with import_from_url "
-                    "instead of modelling from primitives. Optional reference_image "
-                    "(local path or URL): with a generation key (MESHY_API_KEY / "
-                    "TRIPO_API_KEY) it drives image-to-3D via generate_3d (route A); "
-                    "without one it is the visual reference the spec is built from — "
-                    "parts, proportions, colours, materials recorded in the spec "
-                    "(route B). Use the references to work out the real parts and "
-                    "dimensions, then produce a JSON scene spec and call "
-                    "build_from_spec. No code is written before this step."
+                    "RESEARCH FIRST — MANDATORY, ENFORCED IN CODE: Research a model "
+                    "before any code is written. Runs the model/texture search and "
+                    "returns top references (name, source, url) plus the part-breakdown "
+                    "schema AND a grounding record. build_from_spec REFUSES any build "
+                    "without that grounding record — there is no way to build without "
+                    "researching first. PREFER A REAL ASSET OVER PRIMITIVES: if a Poly "
+                    "Haven / Sketchfab / Poly Pizza asset in the results fits the request, "
+                    "the result names it as recommended_path — import it with import_from_url "
+                    "instead of modelling from primitives. For real numbers, call "
+                    "get_dimensions for the product (built-in library of researched "
+                    "dimensions). Optional reference_image (local path or URL): with a "
+                    "generation key (MESHY_API_KEY / TRIPO_API_KEY) it drives image-to-3D "
+                    "via generate_3d (route A); without one it is the visual reference "
+                    "the spec is built from — parts, proportions, colours, materials "
+                    "recorded in the spec (route B), and you MUST list the features you "
+                    "actually observed in the image in grounding.observed_features — the "
+                    "post-build check confirms each one exists in the model. Use the "
+                    "references to work out the real parts and dimensions, then produce "
+                    "a JSON scene spec and call build_from_spec. No code is written "
+                    "before this step."
                 ),
                 inputSchema={
                     "type": "object",
@@ -496,24 +511,56 @@ class BlenderMCPServer:
                 },
             ),
             Tool(
+                name="get_dimensions",
+                description=(
+                    "REAL DIMENSIONS LIBRARY: return researched real-world dimensions "
+                    "for a product — overall size plus per-part sizes in metres, each "
+                    "with its source ([S] = sourced, [E] = estimate from a sourced "
+                    "envelope). Use this instead of inventing numbers: a spec part "
+                    "that claims dimension_source 'library' is checked against these "
+                    "exact numbers and rejected if it does not match within 10%. "
+                    "Products: headphones, sneaker, perfume, smartwatch, chair, temple, "
+                    "rickshaw, thali, haveli, character, spaceship, alien, robot, "
+                    "coffee_mug, desk_lamp. No argument lists all products."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "product": {"type": "string", "description": "Product name, e.g. 'coffee_mug'. Omit to list all products."},
+                    },
+                    "required": [],
+                },
+            ),
+            Tool(
                 name="build_from_spec",
                 description=(
-                    "BUILD FROM SPEC: Build a scene from a JSON scene spec "
-                    "{objects: [{name, kind, size_m, position_m, rotation_deg, "
-                    "material, attach}]}. Conventions: position_m is the "
-                    "BOTTOM-CENTRE of the object, sizes in metres, Z-up, ground "
-                    "z = 0; kind is cube/sphere/cylinder/cone/torus; attach is a "
-                    "mate (grounded, on_top_of:<name>, centred_on:<name>) solved "
-                    "from the parent bounding box. The spec is validated first "
-                    "(sizes > 0, z >= 0, inside a 10 m work area, mates must "
-                    "touch within 0.05 m); on failure the exact failed checks "
-                    "are returned and nothing is built. On success returns "
-                    "object names, bounding boxes and min z."
+                    "BUILD FROM SPEC — GROUNDED BUILDS ONLY: Build a scene from a JSON "
+                    "scene spec {objects: [{name, kind, size_m, position_m, rotation_deg, "
+                    "material, attach, dimension_source}]} PLUS the grounding record from "
+                    "research_model (pass it as the 'grounding' argument or inside the "
+                    "spec as spec.grounding). A BUILD WITH NO VALID GROUNDING IS REFUSED — "
+                    "no silent fallback, no default template, no best-guess model. "
+                    "Conventions: position_m is the BOTTOM-CENTRE of the object, sizes in "
+                    "metres, Z-up, ground z = 0; kind is cube/sphere/cylinder/cone/torus; "
+                    "attach is a mate (grounded, on_top_of:<name>, centred_on:<name>) solved "
+                    "from the parent bounding box. STRICT VALIDATION (enforced in code, "
+                    "exact failed checks returned): every size > 0, finite, and not the "
+                    "[1, 1, 1] placeholder; every position.z >= 0; every part declares "
+                    "dimension_source (measured / research / library / reference_image / "
+                    "retrieved_asset) — a 'library' claim must match get_dimensions within "
+                    "10%; every part has a material; bounding boxes inside a 10 m work area; "
+                    "no floating parts (every part grounded or touching another part). "
+                    "After Blender runs, the saved .blend is re-opened and VERIFIED against "
+                    "the spec (part presence, min z >= 0, every part has a material, "
+                    "dimensions vs spec, connectivity, observed reference features) — if any "
+                    "check fails the tool reports success:false with the exact mismatch, "
+                    "never success:true on a bad build."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "spec": {"description": "Scene spec object, or a JSON string of one"},
+                        "grounding": {"description": "Grounding record returned by research_model (required). May also be given inside the spec as spec.grounding."},
                     },
                     "required": ["spec"],
                 },
@@ -636,8 +683,14 @@ class BlenderMCPServer:
                     "asset for products that have one (smartwatch -> Poly "
                     "Haven CC0 digital watch) and falls back to the procedural "
                     "builder with a note; 'procedural' forces the builder; "
-                    "'retrieved' fails if no asset is available. Returns the "
-                    "saved .blend path, object names, bounding boxes and min z."
+                    "'retrieved' fails if no asset is available. GROUNDED BY "
+                    "CONSTRUCTION: the procedural builders use real dimensions "
+                    "from the built-in dimension library (see get_dimensions) "
+                    "and the retrieved path uses a real asset — the result "
+                    "carries its grounding record. Every build is post-build "
+                    "verified (parts present, min z >= 0, every part has a "
+                    "material, parts connected) before success is reported. "
+                    "Returns the saved .blend path, object names, bounding boxes and min z."
                 ),
                 inputSchema={
                     "type": "object",
@@ -688,7 +741,12 @@ class BlenderMCPServer:
                     "build, never a rebuild), re-render, and verify per fix "
                     "(applied / not applied / regressed). Max 3 auto-refine rounds; "
                     "keep the best render + code and REVERT if a round makes things "
-                    "worse. refine_round tracks the round (1-3)."
+                    "worse. refine_round tracks the round (1-3). ALWAYS run this "
+                    "after a build and before calling the model done — the programmatic "
+                    "checks catch the floating/disconnected parts a VLM misses, and "
+                    "the dual gate (content match + geometric quality) is the final "
+                    "acceptance test. If the spec carried grounding.observed_features "
+                    "from a reference image, check each observed feature is visible."
                 ),
                 inputSchema={
                     "type": "object",
@@ -704,7 +762,7 @@ class BlenderMCPServer:
             ),
             Tool(
                 name="create_complex_model",
-                description="CREATE: Build complex 3D models with internet search + detailed planning. Built-in templates only: temples, vehicles, food, buildings, characters. For anything else use execute_blender_code.",
+                description="CREATE: Build complex 3D models with internet search + detailed planning. Built-in templates only: temples, vehicles, food, buildings, characters. These templates use researched real dimensions (see get_dimensions), so they are grounded by construction. For anything else use research_model first, then build_from_spec with its grounding record — or execute_blender_code with a grounding record and a spec so the build can be verified.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -718,18 +776,30 @@ class BlenderMCPServer:
                 name="execute_blender_code",
                 description=(
                     "CODE: Run arbitrary Blender Python (bpy) code in a headless Blender "
-                    "and save the resulting scene. Use this for ANY model that is not one "
-                    "of the five built-in templates (temple/mandir, auto-rickshaw/vehicle, "
-                    "thali/food, haveli/palace/building, person/human/character). Write "
-                    "Z-up code: Z is height, ground is z = 0, all dimensions in metres, "
-                    "every part's lowest point at z >= 0. The script runs in a fresh empty "
-                    "scene; the result includes Blender's stdout/stderr and the output "
-                    ".blend path. Fix errors from the returned stderr and call again."
+                    "and save the resulting scene. RESEARCH FIRST: research the subject "
+                    "with research_model (or get_dimensions for a known product) BEFORE "
+                    "writing code, and pass its grounding record as 'grounding' — builds "
+                    "without grounding are returned with an explicit UNVERIFIED warning "
+                    "and must be checked with critique_model. Pass a 'spec' too and the "
+                    "build is post-build verified against it (part presence, min z >= 0, "
+                    "materials, dimensions, connectivity); a failed check reports "
+                    "success:false. Use this for ANY model that is not one of the five "
+                    "built-in templates (temple/mandir, auto-rickshaw/vehicle, thali/food, "
+                    "haveli/palace/building, person/human/character) or a build_product "
+                    "product. Write Z-up code: Z is height, ground is z = 0, all dimensions "
+                    "in metres, every part's lowest point at z >= 0, every part touching "
+                    "the ground or another part, every part with a material. A script that "
+                    "creates no meshes, or any mesh below the ground, reports failure. "
+                    "The script runs in a fresh empty scene; the result includes Blender's "
+                    "stdout/stderr and the output .blend path. Fix errors from the returned "
+                    "stderr and call again."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "code": {"type": "string", "description": "Blender Python code using bpy (imports bpy itself if needed)"},
+                        "grounding": {"type": "object", "description": "Grounding record from research_model (recommended — without it the build is returned UNVERIFIED)"},
+                        "spec": {"type": "object", "description": "Optional scene spec {objects: [{name, size_m, material}]} — the build is post-build verified against it"},
                     },
                     "required": ["code"],
                 },
@@ -839,6 +909,9 @@ class BlenderMCPServer:
         elif name == "critique_model":
             return await self._critique_model(arguments)
 
+        elif name == "get_dimensions":
+            return await self._get_dimensions(arguments)
+
         elif name == "search_models":
             return self.search_service.search_models(arguments.get("query", ""))
 
@@ -865,6 +938,40 @@ class BlenderMCPServer:
             return await self._get_scene_info()
 
         return {"success": False, "error": f"Unknown tool: {name}"}
+
+    async def _verify_blend(self, blend_path: str, spec: dict) -> dict:
+        """Post-build verification (v1.3.1 anti-hallucination gate).
+
+        Re-opens the saved .blend in Blender and checks it against the
+        spec (part presence, min z >= 0, every part has a material,
+        dimensions vs spec, connectivity, observed reference features).
+        Returns {"passed": bool, "checks": [...]}. A build whose
+        verification fails — or cannot run — is reported as failure,
+        never success:true.
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(build_verify_script(json.dumps(spec)))
+            script_path = f.name
+        try:
+            result = self.model_builder.run_blender_args(
+                ["--background", blend_path, "--python", script_path],
+                timeout=max(self.config.blender.timeout, 120),
+            )
+            if not result.get("success"):
+                return {
+                    "passed": False,
+                    "checks": [{
+                        "check": "verification_ran",
+                        "passed": False,
+                        "detail": f"verification script failed: {result.get('error', '')}",
+                    }],
+                }
+            return verify_build_report(spec, parse_verify_json(result.get("stdout", "")))
+        finally:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
 
     async def _research_model(self, args: dict) -> dict:
         """Research a model before any code is written."""
@@ -927,9 +1034,27 @@ class BlenderMCPServer:
             }
             if not is_url and not exists:
                 reference["warning"] = f"Local file not found: {reference_image}. Check the path and call again."
+        # v1.3.1: research issues the grounding record that build_from_spec
+        # demands. No grounding = no build. A reference image grounds the
+        # build too — but the calling model must list the features it
+        # actually observed in the image (observed_features); the
+        # post-build check confirms each one exists in the model.
+        if reference_image:
+            grounding = mint_grounding(
+                "reference_image", query=query, reference=reference_image,
+                references=[{"name": r.get("name"), "source": r.get("source"), "url": r.get("url")}
+                            for r in model_results.get("all_results", [])[:8]],
+            )
+        else:
+            grounding = mint_grounding(
+                "research_model", query=query,
+                references=[{"name": r.get("name"), "source": r.get("source"), "url": r.get("url")}
+                            for r in model_results.get("all_results", [])[:8]],
+            )
         return {
             "success": True,
             "query": query,
+            "grounding": grounding,
             "references": references,
             "texture_references": texture_references,
             "recommended_path": recommended_path,
@@ -945,6 +1070,7 @@ class BlenderMCPServer:
                         "rotation_deg": [0, 0, 0],
                         "material": "wood | marble | metal | fabric | steel | glass | skin | sandstone | ...",
                         "attach": "grounded | on_top_of:<ParentName> | centred_on:<ParentName>",
+                        "dimension_source": "measured | research | library | reference_image | retrieved_asset",
                     }
                 ],
             },
@@ -954,16 +1080,26 @@ class BlenderMCPServer:
                 "Bounding boxes must stay inside a 10 m work area (|x|, |y| <= 5, z <= 10).",
                 "attach mates are solved from the parent bounding box, never guessed: on_top_of:<name> means the part sits on the parent and must touch it within 0.05 m.",
                 "Use the references above for real proportions; do not invent dimensions.",
+                "ANTI-HALLUCINATION (enforced in code): every part MUST declare dimension_source (measured / research / library / reference_image / retrieved_asset) and a material. A part claiming 'library' must match the built-in dimension library — call get_dimensions for the real numbers. A part that touches nothing and is not on the ground is rejected as floating. The [1, 1, 1] unit size is a rejected placeholder.",
+                "Pass the 'grounding' record above to build_from_spec (as the grounding argument or inside the spec). A build with no grounding is REFUSED. With a reference image, fill grounding.observed_features with the features you actually saw in the image.",
             ],
             "next_step": (
                 "Produce a JSON scene spec in the schema above (from the references "
-                "and real dimensions) and call build_from_spec with it. No code is "
-                "written before this step."
+                "and real dimensions) and call build_from_spec with it AND the "
+                "grounding record above. No code is written before this step."
             ),
         }
 
     async def _build_from_spec(self, args: dict) -> dict:
-        """Validate a scene spec, then build it and report bounding boxes."""
+        """Validate a scene spec, then build it and verify the result.
+
+        v1.3.1 enforcement: (1) a grounding record is REQUIRED — a build
+        with no research is refused; (2) the spec is strictly validated
+        (real dimensions with stated sources, materials, no floating
+        parts); (3) after Blender runs, the saved .blend is re-opened
+        and verified against the spec — any failed check reports
+        failure, never success:true.
+        """
         spec = args.get("spec")
         if spec is None or spec == "":
             return {
@@ -976,19 +1112,53 @@ class BlenderMCPServer:
         errors = validate_spec(parsed)
         if errors:
             return {"success": False, "errors": errors, "error": f"Spec validation failed: {'; '.join(errors)}"}
+        grounding = args.get("grounding") or parsed.get("grounding")
+        grounding_errors = check_grounding(grounding)
+        if grounding_errors:
+            return {
+                "success": False,
+                "errors": grounding_errors,
+                "error": f"Build refused — no valid research grounding: {'; '.join(grounding_errors)}",
+            }
+        parsed["grounding"] = grounding
         script, build_errors = build_from_spec(parsed)
         if script is None:
             return {"success": False, "errors": build_errors, "error": f"Spec validation failed: {'; '.join(build_errors)}"}
         result = self.model_builder.create_mesh_with_report(script)
+        if not result.get("success"):
+            return {
+                "success": False,
+                "output": result.get("output", ""),
+                "objects": result.get("objects", []),
+                "error": result.get("error", ""),
+                "stdout": result.get("stdout", ""),
+            }
+        verification = await self._verify_blend(result["output"], parsed)
+        failed = [c for c in verification["checks"] if not c.get("passed")]
+        if not verification["passed"]:
+            return {
+                "success": False,
+                "output": result.get("output", ""),
+                "objects": result.get("objects", []),
+                "scene_min": result.get("scene_min", []),
+                "scene_max": result.get("scene_max", []),
+                "min_z": result.get("min_z"),
+                "verification": verification,
+                "error": "Build verification FAILED: " + "; ".join(
+                    f"{c['check']} ({c['detail']})" for c in failed),
+                "stdout": result.get("stdout", ""),
+            }
         return {
-            "success": result.get("success", False),
+            "success": True,
             "output": result.get("output", ""),
             "objects": result.get("objects", []),
             "scene_min": result.get("scene_min", []),
             "scene_max": result.get("scene_max", []),
             "min_z": result.get("min_z"),
+            "grounding": grounding,
+            "verification": verification,
             "stdout": result.get("stdout", ""),
-            "error": result.get("error", ""),
+            "error": "",
         }
 
     def _download_polyhaven_hdri(self, slug):
@@ -1170,6 +1340,22 @@ class BlenderMCPServer:
                 result["product"] = product
                 result["source"] = "retrieved"
                 result["asset"] = asset
+                # v1.3.1: a retrieved real asset IS the grounding — and the
+                # build is still verified before success is reported.
+                result["grounding"] = {
+                    "source": "retrieved_asset",
+                    "product": product,
+                    "asset": {"gltf_path": asset["gltf_path"], "url": asset.get("source_url")},
+                }
+                if result.get("success"):
+                    verify_spec = {"objects": [{"name": o["name"]} for o in result.get("objects", [])]}
+                    verification = await self._verify_blend(result["output"], verify_spec)
+                    result["verification"] = verification
+                    if not verification["passed"]:
+                        failed = [c for c in verification["checks"] if not c.get("passed")]
+                        result["success"] = False
+                        result["error"] = "Build verification FAILED: " + "; ".join(
+                            f"{c['check']} ({c['detail']})" for c in failed)
                 return result
             if source == "retrieved":
                 return {"success": False, "product": product, "source": "retrieved",
@@ -1186,8 +1372,21 @@ class BlenderMCPServer:
         result = self.model_builder.create_mesh_with_report(script)
         result["product"] = product
         result["source"] = "procedural"
+        # v1.3.1: the procedural builders use real dimensions from the
+        # built-in dimension library, so the build is grounded by
+        # construction — and still verified before success is reported.
+        result["grounding"] = {"source": "dimension_library", "product": product}
         if note:
             result["note"] = note
+        if result.get("success"):
+            verify_spec = {"objects": [{"name": o["name"]} for o in result.get("objects", [])]}
+            verification = await self._verify_blend(result["output"], verify_spec)
+            result["verification"] = verification
+            if not verification["passed"]:
+                failed = [c for c in verification["checks"] if not c.get("passed")]
+                result["success"] = False
+                result["error"] = "Build verification FAILED: " + "; ".join(
+                    f"{c['check']} ({c['detail']})" for c in failed)
         return result
 
     async def _add_detail(self, args: dict) -> dict:
@@ -1966,11 +2165,76 @@ print("Created Indian character")
 '''
 
     async def _execute_blender_code(self, args: dict) -> dict:
-        """Run arbitrary Blender Python code supplied by the LLM."""
+        """Run arbitrary Blender Python code supplied by the LLM.
+
+        v1.3.1: this is the free-form escape hatch, so it cannot refuse
+        outright — but it no longer reports silent success either. The
+        build is run with a bounds report: zero meshes, or any mesh
+        below the ground, is a failure. Pass ``grounding`` (from
+        research_model) and/or ``spec`` to get the full post-build
+        verification; without grounding the result carries an explicit
+        UNVERIFIED warning telling the agent to research first and to
+        verify with critique_model.
+        """
         code = args.get("code", "")
         if not code.strip():
             return {"success": False, "error": "No code supplied."}
-        return self.model_builder.create_mesh(code)
+        result = self.model_builder.create_mesh_with_report(code)
+        if not result.get("success"):
+            return result
+        if not result.get("objects"):
+            return {
+                "success": False,
+                "output": result.get("output", ""),
+                "error": "Blender ran but created no mesh objects — the build produced nothing.",
+                "stdout": result.get("stdout", ""),
+            }
+        if (result.get("min_z") is not None) and result["min_z"] < -0.001:
+            return {
+                "success": False,
+                "output": result.get("output", ""),
+                "objects": result.get("objects", []),
+                "min_z": result.get("min_z"),
+                "error": f"Build failed verification: min z = {result['min_z']:.4f} m is below the ground (z = 0).",
+                "stdout": result.get("stdout", ""),
+            }
+        grounding = args.get("grounding")
+        spec = args.get("spec")
+        if grounding is not None:
+            grounding_errors = check_grounding(grounding)
+            if grounding_errors:
+                result["grounding_warning"] = (
+                    "Grounding supplied but invalid: " + "; ".join(grounding_errors))
+            else:
+                result["grounding"] = grounding
+        elif spec is None:
+            result["grounding_warning"] = (
+                "UNVERIFIED BUILD: no grounding supplied. Research first "
+                "(research_model) and pass its grounding record — or a spec — "
+                "so the build can be verified. Render the result and check it "
+                "with critique_model before trusting it; dimensions in this "
+                "code were not checked against any source.")
+        if spec is not None:
+            parsed, parse_error = parse_spec(spec)
+            if parse_error:
+                result["verification_warning"] = f"spec supplied but unparsable: {parse_error}"
+            else:
+                verification = await self._verify_blend(result["output"], parsed)
+                result["verification"] = verification
+                if not verification["passed"]:
+                    failed = [c for c in verification["checks"] if not c.get("passed")]
+                    result["success"] = False
+                    result["error"] = "Build verification FAILED: " + "; ".join(
+                        f"{c['check']} ({c['detail']})" for c in failed)
+        return result
+
+    async def _get_dimensions(self, args: dict) -> dict:
+        """Real-world dimension library lookup (v1.3.1).
+
+        Any calling agent can pull real numbers for a product instead of
+        inventing them. No argument lists all products.
+        """
+        return get_dimensions(args.get("product"))
 
     async def _modify_model(self, args: dict) -> dict:
         """Modify existing model."""

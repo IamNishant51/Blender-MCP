@@ -20,9 +20,15 @@ Conventions (Procedura / SceneCraft pattern):
 
 Validation (all failures are returned with the exact failed check):
 
-- every size component > 0
-- every position.z >= 0
+- every size component > 0, finite, and not the [1, 1, 1] unit placeholder
+- every position.z >= 0 and finite
+- every part declares a dimension_source (measured / research / library /
+  reference_image / retrieved_asset); a part that claims 'library' must
+  match the built-in dimension library for the spec's product
+- every part has a material (an unmaterialed part renders flat grey)
 - bounding boxes inside a 10 m work area (|x|, |y| <= 5, z <= 10)
+- every part must be grounded (bottom z ~ 0) or touch another part's
+  bounding box — a part that touches nothing is floating and is rejected
 - objects declaring ``attach`` must reference an existing object, and for
   ``on_top_of`` the child's bottom must touch the parent's top within
   0.05 m tolerance
@@ -31,9 +37,12 @@ Validation (all failures are returned with the exact failed check):
 import json
 import math
 
+from blender_mcp.grounding import DIMENSION_SOURCES, spec_matches_library
+
 WORK_AREA_HALF = 5.0   # |x|, |y| <= 5 m
 WORK_AREA_HEIGHT = 10.0  # z <= 10 m
 ATTACH_TOLERANCE = 0.05  # m
+CONTACT_TOLERANCE = 0.01  # m — a part must touch the ground or another part
 
 KINDS = ("cube", "sphere", "cylinder", "cone", "torus")
 
@@ -139,6 +148,7 @@ def validate_spec(spec):
     if not isinstance(objects, list) or not objects:
         return ["spec.objects must be a non-empty list"]
     by_name = {}
+    spec_default_source = spec.get("dimension_source")
     for i, obj in enumerate(objects):
         label = obj.get("name") if isinstance(obj, dict) else f"objects[{i}]"
         if not isinstance(obj, dict):
@@ -157,15 +167,46 @@ def validate_spec(spec):
             errors.append(f"{obj['name']}: size_m must be [x, y, z] numbers")
             continue
         for axis, value in zip("xyz", size):
-            if not value > 0:
+            if not math.isfinite(value):
+                errors.append(f"{obj['name']}: size_m.{axis} must be a finite number, got {value}")
+            elif not value > 0:
                 errors.append(f"{obj['name']}: size_m.{axis} must be > 0, got {value}")
+        if (len(size) == 3 and all(isinstance(v, (int, float)) and v == 1 for v in size)):
+            errors.append(
+                f"{obj['name']}: size_m {list(size)} is the [1, 1, 1] unit placeholder — "
+                "replace it with real dimensions from research, the dimension library "
+                "(get_dimensions) or a measurement, and state the source")
         pos = obj.get("position_m")
         if (not isinstance(pos, (list, tuple)) or len(pos) != 3
                 or not all(isinstance(v, (int, float)) for v in pos)):
             errors.append(f"{obj['name']}: position_m must be [x, y, z] numbers")
             continue
+        for axis, value in zip("xyz", pos):
+            if not math.isfinite(value):
+                errors.append(f"{obj['name']}: position_m.{axis} must be a finite number, got {value}")
         if pos[2] < 0:
             errors.append(f"{obj['name']}: position_m.z must be >= 0 (ground), got {pos[2]}")
+        # Every part needs a stated dimension source — a number with no
+        # provenance is an invented number.
+        source = obj.get("dimension_source") or spec_default_source
+        if not source:
+            errors.append(
+                f"{obj['name']}: missing 'dimension_source' — state where the dimensions "
+                f"came from: {', '.join(DIMENSION_SOURCES)}")
+        elif source not in DIMENSION_SOURCES:
+            errors.append(
+                f"{obj['name']}: dimension_source {source!r} is not one of "
+                f"{', '.join(DIMENSION_SOURCES)}")
+        # Every part needs a material — an unmaterialed part renders flat grey.
+        if not obj.get("material"):
+            errors.append(
+                f"{obj['name']}: missing 'material' — every part must name a material "
+                "(wood, metal, glass, fabric, steel, ...)")
+        rot = obj.get("rotation_deg")
+        if rot is not None and (not isinstance(rot, (list, tuple)) or len(rot) != 3
+                                or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in rot)):
+            errors.append(f"{obj['name']}: rotation_deg must be [x, y, z] finite numbers")
+            continue
         # Work-area check on the (possibly rotated) bounding box.
         try:
             lo, hi = object_bounds(obj)
@@ -232,6 +273,44 @@ def validate_spec(spec):
                 errors.append(
                     f"{obj['name']}: attach {attach!r} is not 'grounded', "
                     f"'on_top_of:<name>' or 'centred_on:<name>'")
+    # Floating check: a part with no mate (or a centred_on mate, whose z
+    # still comes from position_m) must sit on the ground or touch
+    # another part's bounding box. A part that touches nothing is floating
+    # and is rejected — the failure VLMs miss most often.
+    _bounds = {}
+    for obj in objects:
+        if isinstance(obj, dict) and obj.get("name"):
+            try:
+                _bounds[obj["name"]] = object_bounds(obj)
+            except (KeyError, TypeError, ValueError):
+                pass
+    for obj in objects:
+        if not isinstance(obj, dict) or not obj.get("name"):
+            continue
+        attach = obj.get("attach") or ""
+        if attach == "grounded" or (isinstance(attach, str) and attach.startswith("on_top_of:")):
+            continue  # covered by the mate checks above
+        own = _bounds.get(obj["name"])
+        if own is None:
+            continue
+        lo, hi = own
+        if lo[2] <= CONTACT_TOLERANCE:
+            continue  # grounded
+        touches = False
+        for other_name, (olo, ohi) in _bounds.items():
+            if other_name == obj["name"]:
+                continue
+            overlap = [min(hi[i], ohi[i]) - max(lo[i], olo[i]) for i in range(3)]
+            if all(v >= -CONTACT_TOLERANCE for v in overlap):
+                touches = True
+                break
+        if not touches:
+            errors.append(
+                f"{obj['name']}: FLOATING — bottom z = {lo[2]:.3f} m, touches nothing "
+                "and is not on the ground. Give it an attach mate (grounded / "
+                "on_top_of:<name>) or move it so it touches another part")
+    # Library cross-check: 'library' claims must match the real numbers.
+    errors.extend(spec_matches_library(spec))
     return errors
 
 

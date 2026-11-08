@@ -32,7 +32,7 @@ written as custom properties on the material).
 import json
 
 POLYHAVEN_API = "https://api.polyhaven.com"
-USER_AGENT = "blender-mcp/1.3.0 (https://github.com/IamNishant51/Blender-MCP)"
+USER_AGENT = "blender-mcp/1.3.1 (https://github.com/IamNishant51/Blender-MCP)"
 POLYHAVEN_LICENCE = "CC0"
 
 
