@@ -210,6 +210,7 @@ console.log('scene spec');
   check('spec: valid spec passes', validateSpec(valid).length === 0, validateSpec(valid).join('; '));
   const { script, errors } = buildFromSpec(valid);
   check('spec: build returns a script', typeof script === 'string' && script.length > 0, errors.join('; '));
+  check('spec: flat caps stay flat-shaded, sides smooth', script.includes('abs(_p.normal.z) < 0.999') && !script.includes('for _p in _obj.data.polygons: _p.use_smooth = True'));
   check('spec: mate helpers emitted', script.includes('def on_top_of') && script.includes('def grounded') && script.includes('def centred_on'));
   const r = boundsFor(script);
   const n = byName(r);
@@ -263,8 +264,14 @@ console.log('materials + render');
   check('render: unknown engine throws', badEngine);
   // v1.3.0 fix round: exact fill-based framing (the old max_dim * 2.5
   // heuristic rendered the demo watch at ~30% of the frame).
+  // v1.4.0 note: `max_dim * 2.5` still appears in the script, but only as
+  // the cinematic fog-cube size — so the check scopes to _frame_camera,
+  // the framing code the heuristic lived in.
   const fillScript = buildRenderScript(['perspective'], { engine: 'CYCLES' });
-  check('render: fill framing replaces 2.5x heuristic', fillScript.includes('FILL_FRACTION = 0.7') && fillScript.includes('_frame_camera') && !fillScript.includes('max_dim * 2.5'));
+  const frameStart = fillScript.indexOf('def _frame_camera');
+  const frameEnd = fillScript.indexOf('\ndef ', frameStart + 1);
+  const frameFn = fillScript.slice(frameStart, frameEnd === -1 ? undefined : frameEnd);
+  check('render: fill framing replaces 2.5x heuristic', fillScript.includes('FILL_FRACTION = 0.7') && fillScript.includes('_frame_camera') && !frameFn.includes('max_dim * 2.5'));
   let badFill = false;
   try { buildRenderScript(['front'], { fill_fraction: 0.1 }); } catch { badFill = true; }
   check('render: bad fill_fraction throws', badFill);
@@ -327,10 +334,10 @@ console.log('generate_3d');
 // --- detail helpers (v1.3.0) ---
 console.log('detail helpers');
 {
-  check('details: 8 kinds', DETAIL_KINDS.length === 8 && DETAIL_KINDS.includes('bevel') && DETAIL_KINDS.includes('grille') && DETAIL_KINDS.includes('label'));
+  check('details: 11 kinds', DETAIL_KINDS.length === 11 && DETAIL_KINDS.includes('bevel') && DETAIL_KINDS.includes('grille') && DETAIL_KINDS.includes('label') && DETAIL_KINDS.includes('condensation') && DETAIL_KINDS.includes('emissive_ring') && DETAIL_KINDS.includes('glow_strip'));
   for (const kind of DETAIL_KINDS) {
     const s = getDetailScript(kind, 'Table', {});
-    check(`detail: ${kind} script mentions its mechanism`, s.includes('Bevel') || s.includes('SUBSURF') || s.includes('PanelLine') || s.includes('Screw') || s.includes('Bolt') || s.includes('Seam') || s.includes('Grille') || s.includes('Label'));
+    check(`detail: ${kind} script mentions its mechanism`, s.includes('Bevel') || s.includes('SUBSURF') || s.includes('PanelLine') || s.includes('Screw') || s.includes('Bolt') || s.includes('Seam') || s.includes('Grille') || s.includes('Label') || s.includes('Condensation') || s.includes('EmissiveRing') || s.includes('GlowStrip'));
   }
   let unknown = false;
   try { getDetailScript('engrave', 'Table', {}); } catch { unknown = true; }
@@ -357,6 +364,56 @@ console.log('detail helpers');
   check('detail: seam is a unit torus scaled to the cross-section ellipse', seamScript.includes('major_radius=1.0') && seamScript.includes('_seam.scale') && !seamScript.includes('max(_size'));
 }
 
+// --- cinematic preset (v1.4.0) ---
+console.log('cinematic preset');
+{
+  const cine = buildRenderScript(['perspective'], { style: 'cinematic' });
+  check('cinematic: AgX Punchy + 512 samples + 85 mm + 0.4 fill', cine.includes('AgX - Punchy') && cine.includes('SAMPLES = 512') && cine.includes('LENS = 85') && cine.includes('FILL_FRACTION = 0.4'));
+  check('cinematic: teal/amber rims, no sun in the cinematic branch', cine.includes('CineRimTeal') && cine.includes('CineRimAmber') && cine.includes('if not CINEMATIC:'));
+  check('cinematic: fog + mist + glare', cine.includes('FOG_DENSITY') && cine.includes('use_pass_mist') && cine.includes('FOG_GLOW'));
+  // Regression (2026-11-08 NISHANT hero): a 256x256 vignette image fed
+  // into a MULTIPLY Mix node shrank every cinematic render to a centred
+  // 256x256 square, cropping the hero's lid, glow ring and base.
+  check('cinematic: vignette is full render resolution, not 256x256', cine.includes('_vw, _vh = RES_X, RES_Y') && !cine.includes('_vw, _vh = 256, 256'));
+  let badStyle = false;
+  try { buildRenderScript(['front'], { style: 'moody' }); } catch { badStyle = true; }
+  check('cinematic: bad style throws', badStyle);
+  let badEnv = false;
+  try { buildRenderScript(['front'], { style: 'cinematic', environment: 'beach' }); } catch { badEnv = true; }
+  check('cinematic: bad environment throws', badEnv);
+  let badFog = false;
+  try { buildRenderScript(['front'], { style: 'cinematic', fog_density: 0.5 }); } catch { badFog = true; }
+  check('cinematic: bad fog_density throws', badFog);
+  let badTrans = false;
+  try { buildRenderScript(['front'], { style: 'cinematic', transparent: true }); } catch { badTrans = true; }
+  check('cinematic: cinematic + transparent throws', badTrans);
+  const hall = buildRenderScript(['perspective'], { style: 'cinematic', environment: 'industrial_hall', hero_scale_m: 3.0, scale_figure: true });
+  check('cinematic: hall + hero scale + scale figure', hall.includes('HALL_L') && hall.includes('ScaleFigure') && hall.includes('HERO_SCALE_M = 3.0'));
+  const neon = buildRenderScript(['perspective'], { style: 'cinematic', environment: 'neon' });
+  check('cinematic: neon has strips', neon.includes('NeonStrip'));
+  const studio = buildRenderScript(['front', 'side', 'perspective']);
+  check('cinematic: studio defaults unchanged', studio.includes('STYLE = "studio"') && studio.includes('LENS = 50') && studio.includes('FILL_FRACTION = 0.7'));
+  check('material: weathered_stone has Pointiness + AO + Voronoi', getMaterialScript('weathered_stone').includes('Pointiness') && getMaterialScript('weathered_stone').includes('ShaderNodeAmbientOcclusion') && getMaterialScript('weathered_stone').includes('ShaderNodeTexVoronoi'));
+  check('material: brushed_aluminium is anisotropic', getMaterialScript('brushed_aluminium').includes('Anisotropic') && getMaterialScript('brushed_aluminium').includes('ShaderNodeTangent'));
+  check('material: printed_can rule (Metallic 0.0 + coat)', getMaterialScript('printed_can').includes('["Metallic"].default_value = 0.0') && getMaterialScript('printed_can').includes('["Coat Weight"].default_value = 1.0'));
+  check('material: emissive teal/amber', getMaterialScript('emissive_teal').includes('Emission Strength') && getMaterialScript('emissive_amber').includes('(1.0, 0.55, 0.2, 1)'));
+  check('material: coffee is dark brown, not stone grey', getMaterialScript('coffee').includes('(0.09, 0.045, 0.02, 1)') && getMaterialScript('coffee').includes('["Roughness"].default_value = 0.7') && getMaterialScript('coffee').includes('["Specular IOR Level"].default_value = 0.0'));
+  check('material: ceramic is white glazed', getMaterialScript('ceramic').includes('(0.95, 0.95, 0.95, 1)') && getMaterialScript('ceramic').includes('["Roughness"].default_value = 0.3'));
+  const cond = getDetailScript('condensation', 'CanBody', {});
+  check('detail: condensation uses visible_shadow + template stamping', cond.includes('visible_shadow = False') && !cond.includes('_drops.cycles_visibility') && cond.includes('_stamp(_m)'));
+  let badDensity = false;
+  try { getDetailScript('condensation', 'CanBody', { density: 'soaked' }); } catch { badDensity = true; }
+  check('detail: bad condensation density throws', badDensity);
+  const ring = getDetailScript('emissive_ring', 'CanBody', { color: '#00D8FF', strength: 3 });
+  check('detail: emissive_ring builds', ring.includes('EmissiveRing') && ring.includes('Emission Strength'));
+  const strip = getDetailScript('glow_strip', 'CanBody', { face: 'front', strength: 5 });
+  check('detail: glow_strip builds', strip.includes('GlowStrip') && strip.includes('Emission Strength'));
+  const can = getDimensions('slim_can_250ml');
+  check('grounding: slim can 53x133 from Crown', can.success === true && JSON.stringify(can.overall_size_m) === JSON.stringify([0.053, 0.053, 0.133]) && can.parts.CanBody.material === 'printed_can');
+  const cprompt = buildCritiquePrompt({ objects: [{ name: 'CanBody', size_m: [0.053, 0.053, 0.133] }] }, []);
+  check('critique: prompt has cinematic checks', cprompt.includes('brightest object') && cprompt.includes('rim light') && cprompt.includes('light shafts') && cprompt.includes('banding'));
+}
+
 // --- anti-hallucination grounding (v1.3.1) ---
 console.log('grounding');
 {
@@ -369,7 +426,7 @@ console.log('grounding');
   check('grounding: library grounding needs a known product', checkGrounding({ source: 'dimension_library', product: 'teleporter' }).length > 0 && checkGrounding({ source: 'dimension_library', product: 'coffee_mug' }).length === 0);
   const mug = getDimensions('coffee_mug');
   check('grounding: library has real coffee mug numbers', mug.success === true && JSON.stringify(mug.overall_size_m) === JSON.stringify([0.111, 0.082, 0.088]));
-  check('grounding: library covers 15 products', Object.keys(DIMENSION_LIBRARY).length === 15);
+  check('grounding: library covers 16 products', Object.keys(DIMENSION_LIBRARY).length === 16);
   check('grounding: library rickshaw matches Bajaj RE4S spec', JSON.stringify(DIMENSION_LIBRARY.rickshaw.overall_size_m) === JSON.stringify([2.658, 1.3, 1.7]));
   check('grounding: unknown product fails cleanly', getDimensions('teleporter').success === false);
   check('spec: rejects missing dimension_source', validateSpec({ objects: [{ name: 'X', kind: 'cube', size_m: [0.2, 0.2, 0.2], position_m: [0, 0, 0], material: 'wood' }] }).some((e) => e.includes('dimension_source')));

@@ -149,7 +149,7 @@ class BlenderMCPServer {
         },
         {
           name: 'render_model',
-          description: 'RENDER / LOOK: Render a saved .blend with the presentation preset (camera auto-framed on the bounding-box centre, 3-point + rim area-light rig, sun + world light, ground plane) as PNGs, one per view. Engine EEVEE (default, fast previews) or CYCLES (final stills: CPU path tracer, 128-256 samples + OpenImageDenoise, Khronos PBR Neutral for catalogue shots / AgX for hero shots). Optional studio HDRI via hdri "polyhaven:<slug>" (CC0, verified licence; falls back to world+sun if the download fails), transparent-background product shots (Cycles Shadow Catcher + Film Transparent; EEVEE has no shadow catcher), turntable_frames (extra orbit frames, exactly 360 deg about Z). Lens: 50 mm default, 85 mm hero, 90-105 mm macro. Every PNG is verified to exist on disk and be non-empty before success is reported — a missing/empty PNG returns success:false, never success:true. Returns the PNG paths and file sizes.',
+          description: 'RENDER / LOOK: Render a saved .blend with the presentation preset (camera auto-framed on the bounding-box centre, 3-point + rim area-light rig, sun + world light, ground plane) as PNGs, one per view. Engine EEVEE (default, fast previews) or CYCLES (final stills: CPU path tracer, 128-256 samples + OpenImageDenoise, Khronos PBR Neutral for catalogue shots / AgX for hero shots). Optional studio HDRI via hdri "polyhaven:<slug>" (CC0, verified licence; falls back to world+sun if the download fails), transparent-background product shots (Cycles Shadow Catcher + Film Transparent; EEVEE has no shadow catcher), turntable_frames (extra orbit frames, exactly 360 deg about Z). Lens: 50 mm default, 85 mm hero, 90-105 mm macro. Every PNG is verified to exist on disk and be non-empty before success is reported — a missing/empty PNG returns success:false, never success:true. Returns the PNG paths and file sizes. CINEMATIC HERO PRESET (v1.4.0): for ANY hero or product render, pass style "cinematic" — it replaces the studio rig with a dark low-key cinematic look (warm key + teal/amber rim lights at 2x key, volumetric fog, wet reflective floor, AgX Punchy, 512 samples + OIDN, glare/vignette/colour-grade compositor, DoF f/5.6). environment picks the set: "dark_studio" (default), "industrial_hall" (columns + glow planes — use with hero_scale_m 2-4 for a monumental hero and scale_figure for a 1.7 m human at the base), or "neon" (emissive strips). fog_density default 0.01 (0.001-0.2). style "studio" keeps the previous presentation preset.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -165,6 +165,11 @@ class BlenderMCPServer {
               turntable_frames: { type: 'number', description: 'Extra orbit frames (0 = off); renders <prefix>_turntable_<nn>.png' },
               resolution: { type: 'array', items: { type: 'number' }, description: 'Resolution [width, height]; default EEVEE [960,720], Cycles [1280,720]' },
               hdri: { type: 'string', description: 'Studio HDRI: "polyhaven:<slug>" (CC0, auto-downloaded) or a local .hdr/.exr path. Empty = world+sun fallback.' },
+              style: { type: 'string', description: '"studio" (default presentation preset) or "cinematic" (hero/product renders — use this for any hero or product shot)' },
+              environment: { type: 'string', description: 'Cinematic only: "dark_studio" (default), "industrial_hall", or "neon"' },
+              scale_figure: { type: 'boolean', description: 'Cinematic only: add a 1.7 m human silhouette at the hero base for scale (industrial_hall heroes)' },
+              hero_scale_m: { type: 'number', description: 'Cinematic only: uniform hero height in metres, 0.05-50 (e.g. 3.0 for a monumental 3 m hero can); default = real size' },
+              fog_density: { type: 'number', description: 'Cinematic only: fog volume density, 0.001-0.2; default 0.01 (never 0.1 for a hall — that is opaque)' },
             },
             required: ['blend_path', 'output_path'],
           },
@@ -769,6 +774,11 @@ class BlenderMCPServer {
     if (typeof args.fill_fraction === 'number') options.fill_fraction = args.fill_fraction;
     if (typeof args.transparent === 'boolean') options.transparent = args.transparent;
     if (typeof args.turntable_frames === 'number') options.turntable_frames = args.turntable_frames;
+    if (typeof args.style === 'string') options.style = args.style as RenderOptions['style'];
+    if (typeof args.environment === 'string') options.environment = args.environment as RenderOptions['environment'];
+    if (typeof args.scale_figure === 'boolean') options.scale_figure = args.scale_figure;
+    if (typeof args.hero_scale_m === 'number') options.hero_scale_m = args.hero_scale_m;
+    if (typeof args.fog_density === 'number') options.fog_density = args.fog_density;
     if (Array.isArray(args.resolution) && args.resolution.length === 2) {
       options.resolution = [Number(args.resolution[0]), Number(args.resolution[1])];
     }

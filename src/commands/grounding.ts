@@ -203,7 +203,7 @@ export const DIMENSION_LIBRARY: Record<string, LibraryEntry> = {
     parts: {
       MugBody: { size_m: [0.082, 0.082, 0.088], material: 'ceramic', note: '[E] cylinder Ø 0.082 m, H 0.088 m, sits on the ground' },
       Handle: { size_m: [0.035, 0.05, 0.012], material: 'ceramic', note: '[E] vertical loop on one side: rotation_deg [90, 0, 0], x 0.035-0.07 m (overlaps the body), z 0.025-0.075 m — an unrotated torus is a flat ring, not a handle' },
-      Coffee: { size_m: [0.072, 0.072, 0.002], material: 'coffee', note: '[E] coffee surface disc FLUSH with the rim (top z = 0.088 m). The spec-path body is a solid cylinder, so a disc placed inside it is hidden — the surface must sit at the rim' },
+      Coffee: { size_m: [0.072, 0.072, 0.002], material: 'coffee', note: '[E] coffee surface disc FLUSH with the rim (top z = 0.088 m). The spec-path body is a solid cylinder, so a disc placed inside it is hidden — the surface must sit at the rim. v1.4.0: the disc top must sit ~0.5 mm ABOVE the rim (bottom z = 0.0865), never exactly coplanar with the body cap — coplanar tops z-fight and the white body cap wins, so the coffee renders grey no matter the material' },
     },
   },
   desk_lamp: {
@@ -215,6 +215,16 @@ export const DIMENSION_LIBRARY: Record<string, LibraryEntry> = {
       UpperArm: { size_m: [0.02, 0.02, 0.2], material: 'metal', note: '[E] upper arm from elbow joint to the shade' },
       Shade: { size_m: [0.14, 0.14, 0.16], material: 'metal', note: '[E] cone shade Ø 0.14 m, angled down over the desk' },
       Bulb: { size_m: [0.05, 0.05, 0.06], material: 'glass', note: '[E] bulb inside the shade' },
+    },
+  },
+  slim_can_250ml: {
+    overall_size_m: [0.053, 0.053, 0.133],
+    source: '[S] Crown Holdings 202 x 504.5 slim can, 250 ml (Ø 0.053 m, H 0.133 m) — verified can-maker spec; do NOT present as a Red Bull official spec (Red Bull publishes capacity only)',
+    parts: {
+      CanBody: { size_m: [0.053, 0.053, 0.121], material: 'printed_can', note: '[S] printed can body, Ø 0.053 m, z 0-0.121 m; use printed_can (Metallic 0.0 + lacquer coat) — a metallic body renders dark and desaturated' },
+      Neck: { size_m: [0.051, 0.051, 0.012], material: 'brushed_aluminium', note: '[E] neck taper ~10-12 mm from body to lid, z 0.121-0.133 m — estimate, not a sourced spec' },
+      Lid: { size_m: [0.05, 0.05, 0.003], material: 'brushed_aluminium', note: '[S] 200 end lid, Ø ~0.05 m, z 0.130-0.133 m; unprinted metal — brushed_aluminium (Metallic 1.0) is correct here' },
+      StayTab: { size_m: [0.015, 0.006, 0.001], material: 'polished_steel', note: '[E] stay-tab ~15 mm long on the lid — estimate, not a sourced spec' },
     },
   },
 };

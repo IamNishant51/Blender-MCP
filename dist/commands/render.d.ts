@@ -26,6 +26,23 @@
  *   (Albedo + Normal passes); EEVEE for fast previews / turntable drafts
  * - Turntable: exactly 360 deg about Z at constant speed, camera orbiting
  *   at fixed elevation, lights fixed
+ * - Cinematic style (v1.4.0, `style: 'cinematic'`): AgX + Look "AgX - Punchy",
+ *   Cycles 512 samples + OIDN, 1920x1080, low-key 8:1 rig (warm key spot,
+ *   teal rim 1.5-2x key light-linked to the hero, amber rim + accent),
+ *   bounded Principled-Volume fog cube (density 0.01, anisotropy 0.5,
+ *   noise-modulated), Mist pass, wet reflective floor, DoF f/5.6, and a
+ *   compositor chain (Mist -> Glare Fog Glow -> teal-lift/warm-gain Color
+ *   Balance -> S-curve -> vignette -> film grain). Environments:
+ *   dark_studio (near-black world + wet floor), industrial_hall (hall box +
+ *   columns + background glow planes + fog), neon (emissive strip cards +
+ *   under-glow). Optional 1.7 m silhouette scale figure and render-time
+ *   monumental hero scaling (`hero_scale_m` — labelled hero-scale, not
+ *   real scale). All bpy property/enum names were smoke-tested in real
+ *   Blender 4.2.0 before shipping (see research report §9): the AgX Look is
+ *   "AgX - Punchy" (bare "Punchy" is wrong), Principled Coat/Anisotropic
+ *   inputs are Title Case, light linking works via
+ *   `Object.light_linking.receiver_collection`, and
+ *   `scene.cycles.volume_sampling` does NOT exist in 4.2 (dropped).
  *
  * The script is run as `blender --background <blend> --python <script> --
  * <output_prefix> <view...>` and prints a RENDER_DONE_JSON line. The host
@@ -37,6 +54,8 @@ export declare const RENDER_VIEWS: readonly ["front", "side", "back", "top", "pe
 export type RenderView = (typeof RENDER_VIEWS)[number];
 export type RenderEngine = 'EEVEE' | 'CYCLES';
 export type ViewTransform = 'Khronos PBR Neutral' | 'AgX';
+export type RenderStyle = 'studio' | 'cinematic';
+export type RenderEnvironment = 'dark_studio' | 'industrial_hall' | 'neon';
 export interface RenderOptions {
     engine?: RenderEngine;
     samples?: number;
@@ -47,6 +66,11 @@ export interface RenderOptions {
     turntable_frames?: number;
     resolution?: [number, number];
     hdri_path?: string;
+    style?: RenderStyle;
+    environment?: RenderEnvironment;
+    scale_figure?: boolean;
+    hero_scale_m?: number;
+    fog_density?: number;
 }
 export declare function buildRenderScript(views: string[], options?: RenderOptions): string;
 //# sourceMappingURL=render.d.ts.map

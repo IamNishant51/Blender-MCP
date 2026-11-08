@@ -253,6 +253,11 @@ class _FakeImages:
 class _FakePolygon:
     def __init__(self):
         self.use_smooth = False
+        # Real Blender polygons carry .normal (mathutils.Vector); the
+        # generated spec script reads _p.normal.z to keep flat caps
+        # flat-shaded, so the fake needs one too. Default is a cap
+        # normal (0, 0, 1): the harness's generic polygons stay flat.
+        self.normal = Vector((0, 0, 1))
 
 
 class _FakeMeshData:

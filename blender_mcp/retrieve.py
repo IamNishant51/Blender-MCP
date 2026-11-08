@@ -47,7 +47,7 @@ from pathlib import Path
 
 POLYHAVEN_API = "https://api.polyhaven.com"
 POLYHAVEN_LICENCE = "CC0"
-POLYHAVEN_USER_AGENT = "blender-mcp/1.3.1 (https://github.com/IamNishant51/Blender-MCP)"
+POLYHAVEN_USER_AGENT = "blender-mcp/1.4.0 (https://github.com/IamNishant51/Blender-MCP)"
 
 POLYPIZZA_API = "https://api.poly.pizza/v1.1"
 

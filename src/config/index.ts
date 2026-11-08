@@ -47,7 +47,7 @@ export function getConfig(): ServerConfig {
 
   return {
     name: 'blender-copilot',
-    version: '1.3.1',
+    version: '1.4.0',
     debug: getEnv('BLENDER_MCP_DEBUG', 'false').toLowerCase() === 'true',
     blender: {
       executable: getEnv('BLENDER_EXECUTABLE', 'blender'),

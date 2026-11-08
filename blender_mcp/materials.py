@@ -16,10 +16,24 @@ procedural materials:
 - rubber:     plain Principled, near-black, Roughness 0.95 — no noise
 - white_leather: plain Principled, off-white, Roughness 0.5, Sheen 0.5
 - amber_liquid: Transmission 0.85, amber Base Color, Roughness 0.05
+- coffee:     very dark brown (0.09, 0.045, 0.02), Roughness 0.7 — the
+  coffee surface (v1.4.0 fix: without this it fell back to stone grey)
 - steel:     Metallic 0.9, Roughness 0.35
 - glass:     Transmission 1, IOR 1.45, Roughness 0.05
 - skin:      Subsurface 0.4, warm brown
 - sandstone: Noise -> warm golden colour + Bump
+
+Cinematic materials (v1.4.0, research report §3):
+- weathered_stone: patchy Noise colour + Voronoi cracks + Pointiness edge
+  wear (x Noise) + AO cavity grime + Bump — the reference head
+- brushed_aluminium: Metallic 1.0, Anisotropic 0.9, Radial-Z tangent,
+  stretched Noise -> Roughness 0.3-0.4 + Bump — can lids/rims/bases
+- printed_can: THE printed-can rule — Metallic 0.0 + Coat 1.0/0.08 (lacquer
+  over the print); metallic only on unprinted metal, never the printed body
+- wet_floor: Noise puddle mask -> Roughness (puddle 0.02, dry 0.6) + wet
+  darkening + Bump — the reference's wet reflective floor
+- emissive_teal / emissive_amber: Emission Strength 3.0 glow (rings/strips;
+  needs a Compositor Glare node to bloom in Cycles)
 
 Unknown material names still fall back to a flat Principled colour (stone).
 
@@ -32,7 +46,7 @@ written as custom properties on the material).
 import json
 
 POLYHAVEN_API = "https://api.polyhaven.com"
-USER_AGENT = "blender-mcp/1.3.1 (https://github.com/IamNishant51/Blender-MCP)"
+USER_AGENT = "blender-mcp/1.4.0 (https://github.com/IamNishant51/Blender-MCP)"
 POLYHAVEN_LICENCE = "CC0"
 
 
@@ -295,6 +309,50 @@ bsdf.inputs["IOR"].default_value = 1.33
     )
 
 
+def _coffee_script(name: str) -> str:
+    """Black coffee surface — very dark brown, soft sheen (Roughness 0.7).
+
+    v1.4.0 fix: the coffee_mug dimension-library part uses material
+    "coffee", but no builder existed, so it silently fell back to the
+    flat stone-grey fallback (0.6, 0.58, 0.55) — the v1.3.1 demo mug
+    rendered with a pale grey/white surface that read as a lid. A real
+    coffee surface is near-black brown, not grey. Roughness is 0.7, not
+    0.35: the disc faces up and the camera looks down at ~67 deg from
+    its normal, where the Fresnel specular is strong — at 0.35 the disc
+    mirror-washed to pale grey-blue (cinematic) and near-white (studio)
+    by reflecting the cool fill light and fog, even though the diffuse
+    brown was correct; 0.7 spreads the specular lobe so the diffuse
+    brown reads with only a soft sheen. Specular IOR Level is 0.0
+    (default 0.5): 0.7 alone only dimmed the wash to grey-blue, so the
+    mirror is removed entirely — a dark liquid in this rig has no
+    visible sheen once the mirror is gone, and a mirror-washed disc
+    reads as a lid.
+    """
+    return (
+        _node_header(name)
+        + '''
+bsdf.inputs["Base Color"].default_value = (0.09, 0.045, 0.02, 1)
+bsdf.inputs["Roughness"].default_value = 0.7
+bsdf.inputs["Metallic"].default_value = 0.0
+bsdf.inputs["Specular IOR Level"].default_value = 0.0
+'''
+    )
+
+
+def _ceramic_script(name: str) -> str:
+    """White glazed ceramic — the mug body. Same silent-fallback class as
+    coffee: "ceramic" had no builder and fell back to stone grey, which
+    only passed as white ceramic under bright studio light."""
+    return (
+        _node_header(name)
+        + '''
+bsdf.inputs["Base Color"].default_value = (0.95, 0.95, 0.95, 1)
+bsdf.inputs["Roughness"].default_value = 0.3
+bsdf.inputs["Metallic"].default_value = 0.0
+'''
+    )
+
+
 def _polished_steel_script(name: str) -> str:
     """Polished steel for small metal parts (yokes, rings, crowns) — NO
     noise nodes. The ``metal``/``steel`` builders put Noise into roughness
@@ -342,6 +400,256 @@ def _black_script(name: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Cinematic materials (v1.4.0) — see research report §3.
+#
+# Scale note (research §3.9, the v1.3.0 strap lesson): every Noise/Voronoi
+# scale below is tuned for its intended subject size in Generated
+# coordinates (weathered_stone ~3 m head, wet_floor a large floor,
+# brushed_aluminium a can lid). They are NOT size-derived: get_material_script
+# receives no object size. If a builder is used on a wildly different
+# scale, the grain will read wrong — that is a known gap, not a silent
+# default (see report §9). The render preset's fog/hall/floor ARE
+# size-derived from the hero bounding box.
+# ---------------------------------------------------------------------------
+
+def _weathered_stone_script(name: str) -> str:
+    """Weathered stone (the reference head): patchy colour, Voronoi cracks,
+    Pointiness edge wear, AO cavity grime, top dust — research §3.8.
+
+    Chain: Noise -> Base Color variation; Voronoi F1 thin dark veins mixed
+    in as cracks; Geometry Pointiness -> ColorRamp -> Mix with a lighter
+    worn colour on convex edges (x high-frequency Noise so the edge is
+    patchy, not a perfect outline); AO node (Distance 0.1 m) darkens
+    cavities. Bevel *modifier* on the mesh is preferred for edge rounding;
+    the Bevel shader node is Cycles-only at ~+20% render time.
+    """
+    return _node_header(name) + '''
+# Patchy stone colour: large Noise -> warm grey-brown band.
+stone_noise = nodes.new("ShaderNodeTexNoise")
+stone_noise.location = (-600, 300)
+stone_noise.inputs["Scale"].default_value = 4.0
+stone_noise.inputs["Detail"].default_value = 3.0
+links.new(texcoord.outputs["Generated"], stone_noise.inputs["Vector"])
+stone_ramp = nodes.new("ShaderNodeValToRGB")
+stone_ramp.location = (-400, 300)
+stone_ramp.color_ramp.elements[0].position = 0.0
+stone_ramp.color_ramp.elements[0].color = (0.55, 0.45, 0.32, 1)
+stone_ramp.color_ramp.elements[1].position = 1.0
+stone_ramp.color_ramp.elements[1].color = (0.78, 0.66, 0.48, 1)
+links.new(stone_noise.outputs["Fac"], stone_ramp.inputs["Fac"])
+# Thin dark cracks: Voronoi F1 distance -> ramp (dark at 0, white by 0.12).
+vein = nodes.new("ShaderNodeTexVoronoi")
+vein.location = (-600, 100)
+vein.inputs["Scale"].default_value = 10.0
+vein.feature = 'F1'
+vein.distance = 'EUCLIDEAN'
+links.new(texcoord.outputs["Generated"], vein.inputs["Vector"])
+vein_ramp = nodes.new("ShaderNodeValToRGB")
+vein_ramp.location = (-400, 100)
+vein_ramp.color_ramp.elements[0].position = 0.0
+vein_ramp.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1)
+vein_ramp.color_ramp.elements[1].position = 1.0
+vein_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1)
+vein_stop = vein_ramp.color_ramp.elements.new(0.12)
+vein_stop.color = (1.0, 1.0, 1.0, 1)
+links.new(vein.outputs["Distance"], vein_ramp.inputs["Fac"])
+crack_mix = nodes.new("ShaderNodeMixRGB")
+crack_mix.location = (-200, 200)
+crack_mix.blend_type = 'MIX'
+crack_mix.inputs[1].default_value = (0.12, 0.1, 0.08, 1)
+links.new(vein_ramp.outputs["Color"], crack_mix.inputs[0])
+links.new(stone_ramp.outputs["Color"], crack_mix.inputs[2])
+# Edge wear: Pointiness (convex > 0.5, flat = 0.5) -> ramp (white > 0.65)
+# x high-frequency Noise so the worn edge is patchy, not a perfect outline.
+geom = nodes.new("ShaderNodeNewGeometry")
+geom.location = (-600, -100)
+wear_noise = nodes.new("ShaderNodeTexNoise")
+wear_noise.location = (-600, -300)
+wear_noise.inputs["Scale"].default_value = 25.0
+wear_noise.inputs["Detail"].default_value = 2.0
+links.new(texcoord.outputs["Generated"], wear_noise.inputs["Vector"])
+wear_ramp = nodes.new("ShaderNodeValToRGB")
+wear_ramp.location = (-400, -100)
+wear_ramp.color_ramp.interpolation = 'EASE'
+wear_ramp.color_ramp.elements[0].position = 0.5
+wear_ramp.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1)
+wear_ramp.color_ramp.elements[1].position = 0.65
+wear_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1)
+links.new(geom.outputs["Pointiness"], wear_ramp.inputs["Fac"])
+wear_mult = nodes.new("ShaderNodeMath")
+wear_mult.location = (-200, -100)
+wear_mult.operation = 'MULTIPLY'
+links.new(wear_ramp.outputs["Color"], wear_mult.inputs[0])
+links.new(wear_noise.outputs["Fac"], wear_mult.inputs[1])
+wear_mix = nodes.new("ShaderNodeMixRGB")
+wear_mix.location = (0, 200)
+wear_mix.blend_type = 'MIX'
+wear_mix.inputs[2].default_value = (0.92, 0.86, 0.74, 1)
+links.new(wear_mult.outputs["Value"], wear_mix.inputs[0])
+links.new(crack_mix.outputs["Color"], wear_mix.inputs[1])
+# Cavity grime: AO (Distance = feature size) darkens crevices. The AO
+# shader node is expensive in Cycles — it is used here, on the ONE hero
+# stone material, never on every material in a scene.
+ao = nodes.new("ShaderNodeAmbientOcclusion")
+ao.location = (-400, -300)
+ao.inputs["Distance"].default_value = 0.1
+ao.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1)
+grime_ramp = nodes.new("ShaderNodeValToRGB")
+grime_ramp.location = (-200, -300)
+grime_ramp.color_ramp.elements[0].position = 0.0
+grime_ramp.color_ramp.elements[0].color = (0.6, 0.6, 0.6, 1)
+grime_ramp.color_ramp.elements[1].position = 0.3
+grime_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1)
+links.new(ao.outputs["Color"], grime_ramp.inputs["Fac"])
+grime_mix = nodes.new("ShaderNodeMixRGB")
+grime_mix.location = (200, 200)
+grime_mix.blend_type = 'MULTIPLY'
+grime_mix.inputs[1].default_value = (1.0, 1.0, 1.0, 1)
+links.new(grime_ramp.outputs["Color"], grime_mix.inputs[2])
+links.new(wear_mix.outputs["Color"], grime_mix.inputs[1])
+links.new(grime_mix.outputs["Color"], bsdf.inputs["Base Color"])
+# Bump from the same large noise (Distance 0.02 m — the 1.0 default is 1 m,
+# far too big for products).
+stone_bump = nodes.new("ShaderNodeBump")
+stone_bump.location = (-200, -500)
+stone_bump.inputs["Strength"].default_value = 0.3
+stone_bump.inputs["Distance"].default_value = 0.02
+links.new(stone_noise.outputs["Fac"], stone_bump.inputs["Height"])
+links.new(stone_bump.outputs["Normal"], bsdf.inputs["Normal"])
+bsdf.inputs["Roughness"].default_value = 0.85
+'''
+
+
+def _brushed_aluminium_script(name: str) -> str:
+    """Brushed aluminium (can lids, rims, bases — NOT the printed body):
+    Metallic 1.0, Anisotropic 0.9, Radial-Z tangent (circular brushing on
+    a disc), stretched Noise -> Roughness (0.3-0.4) + Bump. Anisotropic is
+    Cycles-only — EEVEE silently ignores it; the stretched-roughness grain
+    is kept anyway so the brushed cue survives in EEVEE too.
+    """
+    return _node_header(name) + '''
+# Stretched noise: Mapping scale (1, 200, 1) elongates the cells into
+# brush streaks along one axis.
+brush_map = nodes.new("ShaderNodeMapping")
+brush_map.location = (-700, 200)
+brush_map.inputs["Scale"].default_value = (1.0, 200.0, 1.0)
+links.new(texcoord.outputs["Generated"], brush_map.inputs["Vector"])
+brush_noise = nodes.new("ShaderNodeTexNoise")
+brush_noise.location = (-600, 200)
+brush_noise.inputs["Scale"].default_value = 8.0
+brush_noise.inputs["Detail"].default_value = 2.0
+links.new(brush_map.outputs["Vector"], brush_noise.inputs["Vector"])
+brush_ramp = nodes.new("ShaderNodeValToRGB")
+brush_ramp.location = (-400, 200)
+brush_ramp.color_ramp.elements[0].position = 0.0
+brush_ramp.color_ramp.elements[0].color = (0.3, 0.3, 0.3, 1)
+brush_ramp.color_ramp.elements[1].position = 1.0
+brush_ramp.color_ramp.elements[1].color = (0.4, 0.4, 0.4, 1)
+links.new(brush_noise.outputs["Fac"], brush_ramp.inputs["Fac"])
+links.new(brush_ramp.outputs["Color"], bsdf.inputs["Roughness"])
+brush_bump = nodes.new("ShaderNodeBump")
+brush_bump.location = (-400, -200)
+brush_bump.inputs["Strength"].default_value = 0.3
+brush_bump.inputs["Distance"].default_value = 0.01
+links.new(brush_noise.outputs["Fac"], brush_bump.inputs["Height"])
+links.new(brush_bump.outputs["Normal"], bsdf.inputs["Normal"])
+# Circular brushing on a disc: Tangent node, Radial, axis Z.
+tangent = nodes.new("ShaderNodeTangent")
+tangent.location = (-400, 0)
+tangent.direction_type = 'RADIAL'
+tangent.axis = 'Z'
+links.new(tangent.outputs["Tangent"], bsdf.inputs["Tangent"])
+bsdf.inputs["Base Color"].default_value = (0.85, 0.85, 0.86, 1)
+bsdf.inputs["Metallic"].default_value = 1.0
+bsdf.inputs["Anisotropic"].default_value = 0.9
+bsdf.inputs["Anisotropic Rotation"].default_value = 0.25
+'''
+
+
+def _printed_can_script(name: str) -> str:
+    """Printed drink-can body — THE printed-can rule, encoded, not a
+    suggestion: a printed can is paint/lacquer over aluminium, NOT
+    anodised colour. Metallic 1.0 + a coloured Base Color renders dark
+    and desaturated (metallic tints only the specular; there is no
+    diffuse). Correct: Metallic 0.0 + label artwork in Base Color + a
+    clear Coat (Weight 1.0, Roughness 0.08, IOR 1.5) as the lacquer over
+    the print. Default colour is matte black; the label texture is applied
+    by the caller (apply_label / image texture in Base Color). Metallic
+    1.0 belongs only on unprinted metal: lid/rim/tab/base — see
+    brushed_aluminium / polished_steel.
+    """
+    return (
+        _node_header(name)
+        + '''
+bsdf.inputs["Base Color"].default_value = (0.03, 0.03, 0.04, 1)
+bsdf.inputs["Roughness"].default_value = 0.3
+bsdf.inputs["Metallic"].default_value = 0.0
+bsdf.inputs["Coat Weight"].default_value = 1.0
+bsdf.inputs["Coat Roughness"].default_value = 0.08
+bsdf.inputs["Coat IOR"].default_value = 1.5
+'''
+    )
+
+
+def _wet_floor_script(name: str) -> str:
+    """Wet reflective floor as a named material (the render preset builds
+    the same node tree inline for the ground plane): Noise puddle mask ->
+    Roughness (puddle 0.02, dry 0.6) + wet darkening in Base Color + a
+    little bump so reflections ripple instead of mirroring perfectly.
+    Never pure-white dry roughness; never exactly 0.0 puddle roughness
+    over a large area. Scale is tuned for Generated coordinates on a
+    large floor (see the scale note at the top of this section).
+    """
+    return _node_header(name) + '''
+floor_noise = nodes.new("ShaderNodeTexNoise")
+floor_noise.location = (-600, 200)
+floor_noise.inputs["Scale"].default_value = 8.0
+floor_noise.inputs["Detail"].default_value = 3.0
+links.new(texcoord.outputs["Generated"], floor_noise.inputs["Vector"])
+floor_ramp = nodes.new("ShaderNodeValToRGB")
+floor_ramp.location = (-400, 200)
+floor_ramp.color_ramp.elements[0].position = 0.45
+floor_ramp.color_ramp.elements[0].color = (0.02, 0.02, 0.02, 1)
+floor_ramp.color_ramp.elements[1].position = 0.62
+floor_ramp.color_ramp.elements[1].color = (0.6, 0.6, 0.6, 1)
+links.new(floor_noise.outputs["Fac"], floor_ramp.inputs["Fac"])
+links.new(floor_ramp.outputs["Color"], bsdf.inputs["Roughness"])
+floor_cramp = nodes.new("ShaderNodeValToRGB")
+floor_cramp.location = (-400, 0)
+floor_cramp.color_ramp.elements[0].position = 0.45
+floor_cramp.color_ramp.elements[0].color = (0.008, 0.008, 0.01, 1)
+floor_cramp.color_ramp.elements[1].position = 0.62
+floor_cramp.color_ramp.elements[1].color = (0.02, 0.02, 0.022, 1)
+links.new(floor_noise.outputs["Fac"], floor_cramp.inputs["Fac"])
+links.new(floor_cramp.outputs["Color"], bsdf.inputs["Base Color"])
+floor_bump = nodes.new("ShaderNodeBump")
+floor_bump.location = (-400, -200)
+floor_bump.inputs["Strength"].default_value = 0.05
+floor_bump.inputs["Distance"].default_value = 0.01
+links.new(floor_noise.outputs["Fac"], floor_bump.inputs["Height"])
+links.new(floor_bump.outputs["Normal"], bsdf.inputs["Normal"])
+bsdf.inputs["Metallic"].default_value = 0.0
+'''
+
+
+def _emissive_script(name: str, color=(0.0, 0.85, 1.0), strength: float = 3.0) -> str:
+    """Emissive glow material (rings, strips, logos). Emission Strength
+    2-5 for a can ring, 5-10 for hero strips; 1.0 is flat colour, not
+    glow; never exceed 10 on a large area in Cycles (fireflies). The
+    glow itself needs a Compositor Glare node to bloom — emission alone
+    does not bloom in Cycles (see the cinematic render preset).
+    """
+    return (
+        _node_header(name)
+        + f'''
+bsdf.inputs["Base Color"].default_value = (0.01, 0.01, 0.01, 1)
+bsdf.inputs["Emission Color"].default_value = ({color[0]}, {color[1]}, {color[2]}, 1)
+bsdf.inputs["Emission Strength"].default_value = {strength}
+'''
+    )
+
+
 # material name -> builder (name is passed through so the material keeps it)
 _NODE_BUILDERS = {
     "wood": _wood_script,
@@ -362,6 +670,8 @@ _NODE_BUILDERS = {
     "rubber": _rubber_script,
     "white_leather": _white_leather_script,
     "amber_liquid": _amber_liquid_script,
+    "coffee": _coffee_script,
+    "ceramic": _ceramic_script,
     "polished_steel": _polished_steel_script,
     "white": _white_script,
     "accent_red": _accent_red_script,
@@ -371,6 +681,13 @@ _NODE_BUILDERS = {
     "stone": lambda n: _sandstone_script(n, dark=(0.55, 0.53, 0.5, 1), light=(0.68, 0.66, 0.63, 1)),
     "terracotta": lambda n: _sandstone_script(n, dark=(0.72, 0.4, 0.26, 1), light=(0.85, 0.52, 0.34, 1)),
     "black": _black_script,
+    # Cinematic (v1.4.0).
+    "weathered_stone": _weathered_stone_script,
+    "brushed_aluminium": _brushed_aluminium_script,
+    "printed_can": _printed_can_script,
+    "wet_floor": _wet_floor_script,
+    "emissive_teal": lambda n: _emissive_script(n, color=(0.0, 0.85, 1.0), strength=3.0),
+    "emissive_amber": lambda n: _emissive_script(n, color=(1.0, 0.55, 0.2), strength=3.0),
 }
 
 
@@ -398,9 +715,18 @@ class MaterialLibrary:
         "rubber": {"base_color": (0.03, 0.03, 0.03, 1), "roughness": 0.95, "metallic": 0.0},
         "white_leather": {"base_color": (0.93, 0.92, 0.90, 1), "roughness": 0.5, "metallic": 0.0},
         "amber_liquid": {"base_color": (0.85, 0.45, 0.12, 1), "roughness": 0.05, "metallic": 0.0},
+        "coffee": {"base_color": (0.09, 0.045, 0.02, 1), "roughness": 0.7, "metallic": 0.0},
+        "ceramic": {"base_color": (0.95, 0.95, 0.95, 1), "roughness": 0.3, "metallic": 0.0},
         "polished_steel": {"base_color": (0.85, 0.85, 0.86, 1), "roughness": 0.25, "metallic": 0.9},
         "white": {"base_color": (0.95, 0.95, 0.95, 1), "roughness": 0.4, "metallic": 0.0},
         "accent_red": {"base_color": (0.65, 0.08, 0.08, 1), "roughness": 0.5, "metallic": 0.0},
+        # Cinematic (v1.4.0) — flat-table entries for backwards compatibility.
+        "weathered_stone": {"base_color": (0.8, 0.7, 0.55, 1), "roughness": 0.85, "metallic": 0.0},
+        "brushed_aluminium": {"base_color": (0.85, 0.85, 0.86, 1), "roughness": 0.3, "metallic": 1.0},
+        "printed_can": {"base_color": (0.03, 0.03, 0.04, 1), "roughness": 0.3, "metallic": 0.0},
+        "wet_floor": {"base_color": (0.02, 0.02, 0.022, 1), "roughness": 0.6, "metallic": 0.0},
+        "emissive_teal": {"base_color": (0.01, 0.01, 0.01, 1), "roughness": 0.4, "metallic": 0.0},
+        "emissive_amber": {"base_color": (0.01, 0.01, 0.01, 1), "roughness": 0.4, "metallic": 0.0},
     }
 
     # Backwards-compatible alias: the old flat table.

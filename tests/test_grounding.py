@@ -86,7 +86,10 @@ MUG_SPEC = _grounded_spec([
      "position_m": [0.0525, 0, 0.025], "rotation_deg": [90, 0, 0],
      "material": "ceramic", "dimension_source": "library"},
     {"name": "Coffee", "kind": "cylinder", "size_m": [0.072, 0.072, 0.002],
-     "position_m": [0, 0, 0.086], "material": "coffee",
+     # v1.4.0: bottom 0.0865, top 0.0885 — 0.5 mm ABOVE the rim, never
+     # exactly coplanar with the body cap (coplanar tops z-fight and the
+     # white body cap wins, so the coffee renders grey).
+     "position_m": [0, 0, 0.0865], "material": "coffee",
      "dimension_source": "library"},
 ])
 

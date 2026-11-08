@@ -412,9 +412,13 @@ def _bounds_of(objs):
         # Curved primitives are flat-shaded by default, which reads as
         # faceted "disco ball" segments under studio light (v1.3.0 demo
         # sneaker toe/heel). Smooth-shade them so they read as moulded
-        # parts. Cubes stay flat-shaded for crisp edges.
+        # parts. Cubes stay flat-shaded for crisp edges. Flat top/bottom
+        # caps (cylinder/cone caps, |normal.z| ~ 1) stay flat-shaded too:
+        # smooth-shading a flat cap interpolates normals across the n-gon
+        # fan and renders triangular streaks — the v1.3.1 coffee disc read
+        # as faceted grey instead of a flat coffee surface.
         if kind != "cube":
-            lines.append("for _p in _obj.data.polygons: _p.use_smooth = True")
+            lines.append("for _p in _obj.data.polygons: _p.use_smooth = abs(_p.normal.z) < 0.999")
         if any(rot):
             lines.append(
                 f"_obj.rotation_euler = (math.radians({rot[0]!r}), math.radians({rot[1]!r}), "

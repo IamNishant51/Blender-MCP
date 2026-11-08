@@ -377,7 +377,10 @@ class ModelBuilder:
         ``output_prefix`` is a file path prefix; each view renders to
         ``<prefix>_<view>.png`` (a trailing .png/.blend extension is stripped).
         ``options``: engine ('EEVEE'|'CYCLES'), samples, view_transform,
-        lens, transparent, turntable_frames, resolution, hdri_path.
+        lens, transparent, turntable_frames, resolution, hdri_path, plus
+        the cinematic preset (v1.4.0): style ('studio'|'cinematic'),
+        environment ('dark_studio'|'industrial_hall'|'neon'), scale_figure,
+        hero_scale_m, fog_density.
         """
         options = options or {}
         blend = Path(blend_path)
@@ -583,7 +586,18 @@ class BlenderMCPServer:
                     "85 mm hero, 90-105 mm macro. Every PNG is verified to exist "
                     "on disk and be non-empty before success is reported — a "
                     "missing/empty PNG returns success:false, never success:true. "
-                    "Returns the PNG paths and file sizes."
+                    "Returns the PNG paths and file sizes. CINEMATIC HERO PRESET "
+                    "(v1.4.0): for ANY hero or product render, pass style "
+                    "'cinematic' — it replaces the studio rig with a dark low-key "
+                    "cinematic look (warm key + teal/amber rim lights at 2x key, "
+                    "volumetric fog, wet reflective floor, AgX Punchy, 512 samples "
+                    "+ OIDN, glare/vignette/colour-grade compositor, DoF f/5.6). "
+                    "environment picks the set: 'dark_studio' (default), "
+                    "'industrial_hall' (columns + glow planes — use with "
+                    "hero_scale_m 2-4 for a monumental hero and scale_figure for "
+                    "a 1.7 m human at the base), or 'neon' (emissive strips). "
+                    "fog_density default 0.01 (0.001-0.2). style 'studio' keeps "
+                    "the previous presentation preset."
                 ),
                 inputSchema={
                     "type": "object",
@@ -600,6 +614,11 @@ class BlenderMCPServer:
                         "turntable_frames": {"type": "number", "description": "Extra orbit frames (0 = off); renders <prefix>_turntable_<nn>.png"},
                         "resolution": {"type": "array", "items": {"type": "number"}, "description": "Resolution [width, height]; default EEVEE [960,720], Cycles [1280,720]"},
                         "hdri": {"type": "string", "description": "Studio HDRI: 'polyhaven:<slug>' (CC0, auto-downloaded) or a local .hdr/.exr path. Empty = world+sun fallback."},
+                        "style": {"type": "string", "description": "'studio' (default presentation preset) or 'cinematic' (hero/product renders — use this for any hero or product shot)"},
+                        "environment": {"type": "string", "description": "Cinematic only: 'dark_studio' (default), 'industrial_hall', or 'neon'"},
+                        "scale_figure": {"type": "boolean", "description": "Cinematic only: add a 1.7 m human silhouette at the hero base for scale (industrial_hall heroes)"},
+                        "hero_scale_m": {"type": "number", "description": "Cinematic only: uniform hero height in metres, 0.05-50 (e.g. 3.0 for a monumental 3 m hero can); default = real size"},
+                        "fog_density": {"type": "number", "description": "Cinematic only: fog volume density, 0.001-0.2; default 0.01 (never 0.1 for a hall — that is opaque)"},
                     },
                     "required": ["blend_path", "output_path"],
                 },
@@ -1240,6 +1259,16 @@ class BlenderMCPServer:
             options["transparent"] = args["transparent"]
         if isinstance(args.get("turntable_frames"), (int, float)):
             options["turntable_frames"] = args["turntable_frames"]
+        if isinstance(args.get("style"), str):
+            options["style"] = args["style"]
+        if isinstance(args.get("environment"), str):
+            options["environment"] = args["environment"]
+        if isinstance(args.get("scale_figure"), bool):
+            options["scale_figure"] = args["scale_figure"]
+        if isinstance(args.get("hero_scale_m"), (int, float)):
+            options["hero_scale_m"] = args["hero_scale_m"]
+        if isinstance(args.get("fog_density"), (int, float)):
+            options["fog_density"] = args["fog_density"]
         if isinstance(args.get("resolution"), list) and len(args["resolution"]) == 2:
             options["resolution"] = [int(args["resolution"][0]), int(args["resolution"][1])]
         hdri_fallback = None

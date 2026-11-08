@@ -423,6 +423,17 @@ def test_build_from_spec_solves_mates_from_bboxes():
     assert abs(hi.z - 0.8) < 0.001
 
 
+def test_build_from_spec_flat_caps_stay_flat_shaded():
+    # v1.4.0: smooth-shading a flat cylinder/cone cap interpolates normals
+    # across the n-gon fan and renders triangular streaks — the v1.3.1
+    # coffee disc read as faceted grey instead of a flat coffee surface.
+    # Caps (|normal.z| ~ 1) stay flat; curved sides stay smooth.
+    script, errors = build_from_spec(VALID_TABLE_SPEC)
+    assert errors == [], errors
+    assert "abs(_p.normal.z) < 0.999" in script
+    assert "for _p in _obj.data.polygons: _p.use_smooth = True" not in script
+
+
 def test_build_from_spec_returns_errors_not_script():
     spec = {"objects": [{"name": "X", "kind": "cube", "size_m": [1, 1, 1],
                          "position_m": [0, 0, -1]}]}
@@ -803,7 +814,8 @@ def test_generate_3d_tool_exists_and_no_key(server):
 # ---------------------------------------------------------------------------
 
 def test_detail_kinds_documented():
-    assert set(DETAIL_KINDS) == {"bevel", "subdivision", "panel_line", "screw", "bolt", "seam", "grille", "label"}
+    assert set(DETAIL_KINDS) == {"bevel", "subdivision", "panel_line", "screw", "bolt", "seam", "grille", "label",
+                                 "condensation", "emissive_ring", "glow_strip"}
     for d in DETAIL_KINDS:
         script = get_detail_script(d, "Table", {})
         compile(script, f"<detail:{d}>", "exec")
@@ -1270,7 +1282,12 @@ def test_render_script_fill_fraction():
     script = py_build_render_script(["perspective"], {"engine": "CYCLES"})
     assert "FILL_FRACTION = 0.7" in script
     assert "_frame_camera" in script and "CAMERA_DIST:" in script
-    assert "max_dim * 2.5" not in script  # the old tiny-watch heuristic is gone
+    # v1.4.0 note: `max_dim * 2.5` still appears in the script, but only as
+    # the cinematic fog-cube size — scope the check to _frame_camera, the
+    # framing code the old tiny-watch heuristic lived in.
+    start = script.index("def _frame_camera")
+    end = script.index("\ndef ", start + 1)
+    assert "max_dim * 2.5" not in script[start:end]  # the old tiny-watch heuristic is gone
     with pytest.raises(ValueError, match="fill_fraction"):
         py_build_render_script(["front"], {"fill_fraction": 0.1})
     with pytest.raises(ValueError, match="fill_fraction"):

@@ -23,7 +23,10 @@ export type DetailKind =
   | 'bolt'
   | 'seam'
   | 'grille'
-  | 'label';
+  | 'label'
+  | 'condensation'
+  | 'emissive_ring'
+  | 'glow_strip';
 
 export interface DetailSpec {
   kind: DetailKind;
@@ -81,6 +84,24 @@ export const DETAIL_TYPES: DetailSpec[] = [
     params: 'face, width_m, height_m, text, text_size_m',
     example: '{detail: "label", target: "BottleBody", params: {face: "front", text: "NOIR"}}',
   },
+  {
+    kind: 'condensation',
+    description: 'Condensation droplets on a cold can/bottle (v1.4.0): bimodal flattened water droplets (Transmission 1.0, IOR 1.33) merged into one mesh on the target surface, plus a wet-film roughness drop (0.1-0.25) on the target material. Counts derive from the target lateral area (a 330 ml can gets ~1200 small + ~80 large); explicit drops_small/drops_large override. Params: density ("hero"|"wide", default "hero" — wide halves the small drops and drops the sub-mm class), drops_small, drops_large, runnels (vertical drip streaks on the lower third, default 8).',
+    params: 'density, drops_small, drops_large, runnels',
+    example: '{detail: "condensation", target: "CanBody", params: {density: "hero"}}',
+  },
+  {
+    kind: 'emissive_ring',
+    description: 'Glowing ring (torus hugging the target bounding box) — the energy-drink glow ring, a neon halo, a light-bar ring. Principled Emission (strength 2-5 for a can ring, 5-10 for hero strips; never > 10 on a large area in Cycles). Needs a Compositor Glare node to bloom — emission alone does not bloom in Cycles (see the cinematic render preset). Params: axis ("x"|"y"|"z", default "z"), radius_scale (default 1.0), tube_m (default 0.002), color ("#RRGGBB" or [r, g, b], default teal #00D8FF), strength (default 3.0).',
+    params: 'axis, radius_scale, tube_m, color, strength',
+    example: '{detail: "emissive_ring", target: "CanBody", params: {color: "#00D8FF", strength: 3}}',
+  },
+  {
+    kind: 'glow_strip',
+    description: 'Thin vertical emissive strip on one face of the target — a glow logo bar, a light strip, a neon edge. Principled Emission (strength 2-5 for a label accent, 5-10 for a hero strip; never > 10). Needs a Compositor Glare node to bloom in Cycles. Params: face (default "front"), width_m (default 0.005), length_m (default 0.8x the face height), color ("#RRGGBB" or [r, g, b], default teal #00D8FF), strength (default 5.0).',
+    params: 'face, width_m, length_m, color, strength',
+    example: '{detail: "glow_strip", target: "CanBody", params: {face: "front", color: "#00D8FF", strength: 5}}',
+  },
 ];
 
 export const DETAIL_KINDS = DETAIL_TYPES.map((d) => d.kind);
@@ -88,6 +109,33 @@ export const DETAIL_KINDS = DETAIL_TYPES.map((d) => d.kind);
 function num(v: unknown, fallback: number): number {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/** Python repr parity: integral floats print as "3.0" in Python but "3" in JS. */
+function pyNum(n: number): string {
+  return Number.isInteger(n) ? `${n}.0` : String(n);
+}
+
+/** Accept '#RRGGBB' or [r, g, b] (0-1 floats); return an [r, g, b] tuple. */
+function parseColor(v: unknown, fallback: [number, number, number]): [number, number, number] {
+  if (v === undefined || v === null) return fallback;
+  if (typeof v === 'string') {
+    const s = v.trim().replace(/^#/, '');
+    if (/^[0-9a-fA-F]{6}$/.test(s)) {
+      return [parseInt(s.slice(0, 2), 16) / 255, parseInt(s.slice(2, 4), 16) / 255, parseInt(s.slice(4, 6), 16) / 255];
+    }
+    throw new Error(`color must be '#RRGGBB' or [r, g, b], got '${v}'.`);
+  }
+  if (Array.isArray(v) && v.length === 3) {
+    const c = v.map((x) => Number(x));
+    if (c.every((x) => Number.isFinite(x) && x >= 0 && x <= 1)) return c as [number, number, number];
+  }
+  throw new Error(`color must be '#RRGGBB' or [r, g, b] in 0-1, got ${JSON.stringify(v)}.`);
+}
+
+/** "(r, g, b, 1)" with Python float repr — matches the Python mirror byte-wise. */
+function rgbaStr(c: [number, number, number]): string {
+  return `(${pyNum(c[0])}, ${pyNum(c[1])}, ${pyNum(c[2])}, 1)`;
 }
 
 /** Face of a bounding box: (axis, sign, centre offset direction). */
@@ -358,6 +406,206 @@ _label_mat.node_tree.nodes["Principled BSDF"].inputs["Roughness"].default_value 
 _plate.data.materials.append(_label_mat)
 ${textBlock}
 print(f"DETAIL_OK label face=${face} on {_target.name}")
+`;
+    }
+    case 'condensation': {
+      const density = String(p.density ?? 'hero').toLowerCase();
+      if (density !== 'hero' && density !== 'wide') {
+        throw new Error(`condensation density must be 'hero' or 'wide', got '${density}'.`);
+      }
+      const dropsSmall = p.drops_small === undefined || p.drops_small === null
+        ? null : Math.max(0, Math.min(5000, Math.round(num(p.drops_small, 0))));
+      const dropsLarge = p.drops_large === undefined || p.drops_large === null
+        ? null : Math.max(0, Math.min(500, Math.round(num(p.drops_large, 0))));
+      const runnels = Math.max(0, Math.min(50, Math.round(num(p.runnels, 8))));
+      const smallLit = dropsSmall === null ? 'None' : String(dropsSmall);
+      const largeLit = dropsLarge === null ? 'None' : String(dropsLarge);
+      return prelude(target) + `
+import bmesh, random
+from mathutils import Vector, Matrix
+random.seed(42)
+# Lateral bbox area of the target; a 330 ml can is ~0.024 m2.
+_area = 2 * (_size[0] + _size[1]) * _size[2]
+_factor = max(0.2, min(3.0, _area / 0.024))
+_n_small = ${smallLit} if ${smallLit} is not None else max(100, min(2500, round(1200 * _factor)))
+_n_large = ${largeLit} if ${largeLit} is not None else max(10, min(150, round(80 * _factor)))
+# 'wide' density: halve the small drops and drop the sub-mm size class.
+_r_small = (0.001, 0.0015) if '${density}' == 'wide' else (0.00025, 0.00075)
+if '${density}' == 'wide':
+    _n_small = _n_small // 2
+_r_large = (0.001, 0.002)
+# Area-weighted face sampling: pick a face by area, then a point on it
+# (barycentric in one of its triangles; quads split 50/50 so both halves
+# are covered — sampling only the first triangle would stripe a can).
+_verts = [_target.matrix_world @ v.co for v in _target.data.vertices]
+_nmat = _target.matrix_world.to_3x3().inverted().transposed()
+_faces = list(_target.data.polygons)
+_weights = [p.area for p in _faces]
+_total = sum(_weights)
+def _pick_point():
+    _r = random.random() * _total
+    for _p, _w in zip(_faces, _weights):
+        _r -= _w
+        if _r <= 0:
+            break
+    _idx = list(_p.vertices)
+    if len(_idx) == 4 and random.random() < 0.5:
+        _tri = (_idx[0], _idx[2], _idx[3])
+    else:
+        _tri = (_idx[0], _idx[1], _idx[2])
+    _a, _b, _c = _verts[_tri[0]], _verts[_tri[1]], _verts[_tri[2]]
+    _u, _v = random.random(), random.random()
+    if _u + _v > 1:
+        _u, _v = 1 - _u, 1 - _v
+    _pt = _a + _u * (_b - _a) + _v * (_c - _a)
+    _n = (_nmat @ _p.normal).normalized()
+    return _pt, _n
+# One unit-sphere template, stamped once per droplet: calling
+# create_uvsphere per droplet is O(n^2)-slow (each op scans the growing
+# mesh) — at hero counts (~1500 drops) it takes minutes. Stamping
+# transformed copies of one template is linear and takes seconds.
+_tpl = bmesh.new()
+bmesh.ops.create_uvsphere(_tpl, u_segments=8, v_segments=6, radius=1.0)
+_tpl.verts.ensure_lookup_table()
+_tpl.faces.ensure_lookup_table()
+_tpl_verts = [v.co.copy() for v in _tpl.verts]
+_tpl_faces = [[v.index for v in f.verts] for f in _tpl.faces]
+_tpl.free()
+_bm = bmesh.new()
+def _stamp(_mat):
+    _vs = [_bm.verts.new(_mat @ _co) for _co in _tpl_verts]
+    for _f in _tpl_faces:
+        _bm.faces.new([_vs[_j] for _j in _f])
+_mesh = bpy.data.meshes.new(_target.name + "_Condensation")
+for _i in range(_n_small + _n_large):
+    _r = random.uniform(*_r_small) if _i < _n_small else random.uniform(*_r_large)
+    _pt, _n = _pick_point()
+    # Sessile cap: a UV sphere flattened (Z 0.45) and lifted so its flat
+    # side sits ON the surface, aligned to the surface normal.
+    _quat = Vector((0, 0, 1)).rotation_difference(_n)
+    _m = (Matrix.Translation(_pt) @ _quat.to_matrix().to_4x4()
+          @ Matrix.Translation((0, 0, 0.45 * _r))
+          @ Matrix.Diagonal(Vector((_r, _r, 0.45 * _r, 1.0))))
+    _stamp(_m)
+# Runnels: vertical drip streaks (elongated drops) on the lower third.
+for _i in range(${runnels}):
+    for _attempt in range(10):
+        _pt, _n = _pick_point()
+        if _pt.z <= _lo[2] + _size[2] * 0.35:
+            break
+    else:
+        continue
+    _len = random.uniform(0.005, 0.02)
+    _r = 0.0008
+    _m = Matrix.Translation(_pt + _n * _r) @ Matrix.Diagonal(Vector((_r, _r, _len / 2, 1.0)))
+    _stamp(_m)
+_bm.to_mesh(_mesh)
+_bm.free()
+_drops = bpy.data.objects.new(_target.name + "_Condensation", _mesh)
+bpy.context.scene.collection.objects.link(_drops)
+# Water material: Transmission 1.0, Roughness 0.02, IOR 1.33.
+_wmat = bpy.data.materials.new(name="CondensationWater")
+_wmat.use_nodes = True
+_wbsdf = _wmat.node_tree.nodes["Principled BSDF"]
+_wbsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1)
+_wbsdf.inputs["Roughness"].default_value = 0.02
+_wbsdf.inputs["Transmission Weight"].default_value = 1.0
+_wbsdf.inputs["IOR"].default_value = 1.33
+_mesh.materials.append(_wmat)
+# Droplets must not cast dotted shadows on the can (research §3.5).
+# NOTE: the research named 'cycles_visibility.shadow' — that is the
+# pre-2.8 API and does not exist in Blender 4.2 (verified). In 4.2 ray
+# visibility is core Object RNA: 'visible_shadow' (Cycles and EEVEE).
+_drops.visible_shadow = False
+# Wet film under the drops: the can is wet between droplets, not dry.
+# Only if the target's first Principled material has an unlinked
+# Roughness — never override a roughness already driven by nodes.
+for _m in _target.data.materials:
+    if _m and _m.use_nodes:
+        _b = _m.node_tree.nodes.get("Principled BSDF")
+        if _b is not None and not _b.inputs["Roughness"].is_linked:
+            _nt2 = _m.node_tree
+            _tex2 = _nt2.nodes.new("ShaderNodeTexCoord")
+            _nz2 = _nt2.nodes.new("ShaderNodeTexNoise")
+            _nz2.inputs["Scale"].default_value = 12.0
+            _nt2.links.new(_tex2.outputs["Generated"], _nz2.inputs["Vector"])
+            _rp2 = _nt2.nodes.new("ShaderNodeValToRGB")
+            _rp2.color_ramp.elements[0].position = 0.0
+            _rp2.color_ramp.elements[0].color = (0.1, 0.1, 0.1, 1)
+            _rp2.color_ramp.elements[1].position = 1.0
+            _rp2.color_ramp.elements[1].color = (0.25, 0.25, 0.25, 1)
+            _nt2.links.new(_nz2.outputs["Fac"], _rp2.inputs["Fac"])
+            _nt2.links.new(_rp2.outputs["Color"], _b.inputs["Roughness"])
+            break
+print(f"DETAIL_OK condensation small={_n_small} large={_n_large} on {_target.name}")
+`;
+    }
+    case 'emissive_ring': {
+      const axisName = String(p.axis ?? 'z').toLowerCase();
+      if (axisName !== 'x' && axisName !== 'y' && axisName !== 'z') {
+        throw new Error(`emissive_ring axis must be 'x', 'y' or 'z', got '${axisName}'.`);
+      }
+      const axis = { x: 0, y: 1, z: 2 }[axisName] as 0 | 1 | 2;
+      const scale = num(p.radius_scale, 1.0);
+      const tube = num(p.tube_m, 0.002);
+      const color = parseColor(p.color, [0.0, 0.85, 1.0]);
+      const strength = num(p.strength, 3.0);
+      if (tube <= 0 || tube > 0.02) throw new Error('emissive_ring tube_m must be > 0 and <= 0.02 m.');
+      if (!(strength > 0 && strength <= 10)) {
+        throw new Error('emissive_ring strength must be > 0 and <= 10 (research: never > 10 on a large area).');
+      }
+      const rot = axis === 2 ? '(0, 0, 0)' : axis === 1 ? '(0, 0, math.pi / 2)' : '(0, math.pi / 2, 0)';
+      const scaleTuple = axis === 2
+        ? '_size[0] / 2, _size[1] / 2, 1'
+        : axis === 1 ? '_size[0] / 2, _size[2] / 2, 1' : '_size[2] / 2, _size[1] / 2, 1';
+      return prelude(target) + `
+import math
+bpy.ops.mesh.primitive_torus_add(location=_centre, major_radius=1.0, minor_radius=${pyNum(tube)})
+_ring = bpy.context.active_object
+_ring.name = _target.name + "_EmissiveRing"
+_ring.rotation_euler = ${rot}
+_sx, _sy, _sz = ${scaleTuple}
+_ring.scale = (_sx * ${pyNum(scale)}, _sy * ${pyNum(scale)}, _sz * ${pyNum(scale)})
+_ring_mat = bpy.data.materials.new(name="EmissiveRing")
+_ring_mat.use_nodes = True
+_rb = _ring_mat.node_tree.nodes["Principled BSDF"]
+_rb.inputs["Base Color"].default_value = (0.01, 0.01, 0.01, 1)
+_rb.inputs["Emission Color"].default_value = ${rgbaStr(color)}
+_rb.inputs["Emission Strength"].default_value = ${pyNum(strength)}
+_ring.data.materials.append(_ring_mat)
+print(f"DETAIL_OK emissive_ring axis=${axisName} strength=${pyNum(strength)} on {_target.name}")
+`;
+    }
+    case 'glow_strip': {
+      const face = String(p.face ?? 'front');
+      const width = num(p.width_m, 0.005);
+      const length = num(p.length_m, 0);
+      const color = parseColor(p.color, [0.0, 0.85, 1.0]);
+      const strength = num(p.strength, 5.0);
+      if (width <= 0 || width > 0.05) throw new Error('glow_strip width_m must be > 0 and <= 0.05 m.');
+      if (!(strength > 0 && strength <= 10)) {
+        throw new Error('glow_strip strength must be > 0 and <= 10 (research: never > 10 on a large area).');
+      }
+      const { axis } = faceInfo(face);
+      const lenExpr = length ? pyNum(length) : axis === 2 ? '_size[0] * 0.8' : '_size[2] * 0.8';
+      const dims = axis === 0
+        ? `(${lenExpr}, ${pyNum(width)}, 0.002)`
+        : axis === 1 ? `(${pyNum(width)}, ${lenExpr}, 0.002)` : `(${lenExpr}, ${pyNum(width)}, 0.002)`;
+      return prelude(target) + `
+_strip_loc = ${facePoint(face, 0, 0, 0.001)}
+bpy.ops.mesh.primitive_cube_add(location=_strip_loc)
+_strip = bpy.context.active_object
+_strip.name = _target.name + "_GlowStrip"
+_strip.dimensions = ${dims}
+_strip.rotation_euler = ${faceRotation(face)}
+_strip_mat = bpy.data.materials.new(name="GlowStrip")
+_strip_mat.use_nodes = True
+_sb = _strip_mat.node_tree.nodes["Principled BSDF"]
+_sb.inputs["Base Color"].default_value = (0.01, 0.01, 0.01, 1)
+_sb.inputs["Emission Color"].default_value = ${rgbaStr(color)}
+_sb.inputs["Emission Strength"].default_value = ${pyNum(strength)}
+_strip.data.materials.append(_strip_mat)
+print(f"DETAIL_OK glow_strip face=${face} strength=${pyNum(strength)} on {_target.name}")
 `;
     }
   }

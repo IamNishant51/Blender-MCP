@@ -19,7 +19,7 @@ import { createHash } from 'crypto';
 
 export const POLYHAVEN_API = 'https://api.polyhaven.com';
 export const POLYHAVEN_LICENCE = 'CC0';
-export const POLYHAVEN_USER_AGENT = 'blender-mcp/1.3.1 (https://github.com/IamNishant51/Blender-MCP)';
+export const POLYHAVEN_USER_AGENT = 'blender-mcp/1.4.0 (https://github.com/IamNishant51/Blender-MCP)';
 export const POLYPIZZA_API = 'https://api.poly.pizza/v1.1';
 
 export interface KnownGoodAsset {
