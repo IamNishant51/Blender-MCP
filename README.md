@@ -23,6 +23,12 @@
   TypeScript + Python &nbsp;·&nbsp; Claude Code · OpenCode · any MCP client
 </p>
 
+<p align="center">
+  <img src="docs/images/nishant-closeup.png" alt="NISHANT energy drink — macro close-up, rendered through this MCP" width="860">
+  <br>
+  <em>NISHANT energy drink — macro close-up. Built and rendered through this MCP: researched, dimensioned, verified, cinematic Cycles render. More renders in the gallery below.</em>
+</p>
+
 ---
 
 ## What it does
